@@ -5,6 +5,7 @@ import compression from "compression";
 import cookieParser from "cookie-parser";
 import morgan from "morgan";
 import routes from "./routes";
+import globalErrorHandler from "./middlewares/middlewares/error.middleware";
 
 const app = express();
 
@@ -21,5 +22,7 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.use("/api/v1", routes);
+
+app.use(globalErrorHandler);
 
 export default app;

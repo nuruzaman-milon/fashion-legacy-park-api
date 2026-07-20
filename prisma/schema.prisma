@@ -42,6 +42,9 @@ enum AuthProvider {
 enum TokenType {
   EMAIL_VERIFICATION
   PASSWORD_RESET
+  // Verifies a NEW address before User.email is changed to it. Committing the
+  // change first and verifying afterwards would let a typo lock the account out.
+  EMAIL_CHANGE
 }
 
 // =====================================================================
@@ -54,6 +57,11 @@ model User {
   email  String  @unique
   phone  String? @unique
   avatar String?
+
+  // Cloudinary public_id. Needed to delete the previous file when an avatar is
+  // replaced -- the URL alone cannot address the asset for deletion, so without
+  // this every change would orphan an image.
+  avatarPublicId String?
 
   role Role @default(CUSTOMER)
 

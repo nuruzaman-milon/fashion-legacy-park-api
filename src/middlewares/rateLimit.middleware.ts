@@ -1,6 +1,20 @@
-import rateLimit, { Options } from "express-rate-limit";
+import rateLimit, { ipKeyGenerator, Options } from "express-rate-limit";
 import { Request } from "express";
 import { isProduction } from "../config/env";
+
+/**
+ * Normalises the client IP before it is used as part of a rate-limit key.
+ *
+ * A raw `req.ip` is wrong for IPv6: a single subscriber typically holds a whole
+ * /64, so every request could present a different address and get its own
+ * bucket -- the limit would be trivially bypassable. `ipKeyGenerator` collapses
+ * the address to its subnet. express-rate-limit refuses to construct a limiter
+ * with a custom keyGenerator that skips this.
+ */
+const ipKey = (req: Request): string => ipKeyGenerator(req.ip ?? "");
+
+const emailKey = (req: Request): string =>
+  typeof req.body?.email === "string" ? req.body.email.toLowerCase() : "";
 
 const json = (message: string): Partial<Options> => ({
   standardHeaders: true,
@@ -23,11 +37,7 @@ const json = (message: string): Partial<Options> => ({
 export const mailAbuseLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   limit: 5,
-  keyGenerator: (req: Request) => {
-    const email =
-      typeof req.body?.email === "string" ? req.body.email.toLowerCase() : "";
-    return `${req.ip}:${email}`;
-  },
+  keyGenerator: (req: Request) => `${ipKey(req)}:${emailKey(req)}`,
   ...json("Too many requests for this email. Please try again in an hour."),
 });
 
@@ -35,11 +45,7 @@ export const mailAbuseLimiter = rateLimit({
 export const credentialLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
-  keyGenerator: (req: Request) => {
-    const email =
-      typeof req.body?.email === "string" ? req.body.email.toLowerCase() : "";
-    return `${req.ip}:${email}`;
-  },
+  keyGenerator: (req: Request) => `${ipKey(req)}:${emailKey(req)}`,
   ...json("Too many attempts. Please try again in 15 minutes."),
 });
 

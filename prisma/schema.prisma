@@ -258,6 +258,12 @@ model Category {
   image  String?
   banner String?
 
+  // Cloudinary public_ids, so replacing an image deletes the old file rather
+  // than orphaning it. Same reasoning as User.avatarPublicId.
+  iconPublicId   String?
+  imagePublicId  String?
+  bannerPublicId String?
+
   parentId String?
 
   sortOrder Int @default(0)
@@ -295,6 +301,8 @@ model Brand {
 
   logo        String?
   description String?
+
+  logoPublicId String?
 
   sortOrder Int @default(0)
 
@@ -500,6 +508,10 @@ model ProductImage {
 
   url String
 
+  // Cloudinary public_id, so deleting an image removes the file rather than
+  // orphaning it. Same reasoning as User.avatarPublicId.
+  publicId String?
+
   alt String?
 
   sortOrder Int @default(0)
@@ -674,6 +686,11 @@ model CartItem {
   variantId String
 
   quantity Int @default(1)
+
+  // What the variant cost when it was added. INFORMATIONAL ONLY -- the cart
+  // always charges the current price. This exists so the UI can say "the price
+  // dropped since you added this", which it cannot detect otherwise.
+  addedPrice Decimal? @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

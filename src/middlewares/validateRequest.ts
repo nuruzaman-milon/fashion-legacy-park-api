@@ -1,8 +1,11 @@
 import { Request, Response, NextFunction } from "express";
-import { ZodSchema } from "zod";
+import { ZodType } from "zod";
 
+// Schemas must be shaped as z.object({ body: ... }) — the generic enforces it.
+// A bare ZodSchema types result.data as `unknown`, so `.body` fails to compile.
 const validateRequest =
-  (schema: ZodSchema) => (req: Request, res: Response, next: NextFunction) => {
+  <T extends { body: unknown }>(schema: ZodType<T>) =>
+  (req: Request, res: Response, next: NextFunction) => {
     const result = schema.safeParse({
       body: req.body,
     });

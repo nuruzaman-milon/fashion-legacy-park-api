@@ -1,5 +1,11 @@
 node_modules
+
+# Build output (tsc outDir)
+dist
+
 # Keep environment variables out of version control
+# NOTE: .env.example is intentionally NOT ignored — keep placeholders only,
+# never a real key.
 .env
 
 /generated/prisma

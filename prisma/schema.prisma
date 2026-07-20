@@ -49,12 +49,10 @@ model User {
   cart          Cart?
   wishlists     Wishlist[]
   reviews       Review[]
-  orders        Order[]
-  notifications Notification[]
-  userCoupons   UserCoupon[]
+  orders            Order[]
+  notifications     Notification[]
+  couponRedemptions CouponRedemption[]
 
-  @@index([email])
-  @@index([phone])
   @@index([role])
 }
 
@@ -78,6 +76,14 @@ model Account {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  // Fully non-null, so this actually constrains. Without it, Postgres NULLS
+  // DISTINCT lets a user hold unlimited EMAIL accounts (providerAccountId is
+  // NULL for those), each with its own password hash — meaning an old password
+  // could keep authenticating, with the winner decided by the query planner.
+  @@unique([userId, provider])
+  // Still correct for OAuth: providerAccountId is non-null there, so this does
+  // stop two users claiming the same Google/Facebook identity. It is only the
+  // NULL (EMAIL) case it cannot constrain, which the unique above now covers.
   @@unique([provider, providerAccountId])
   @@index([userId])
 }
@@ -151,14 +157,15 @@ model Category {
 
   updatedAt DateTime @updatedAt
 
-  parent Category? @relation("CategoryTree", fields: [parentId], references: [id])
+  // Restrict, not the Prisma default SetNull: deleting a parent would silently
+  // promote its whole subtree to root and reorganise the homepage nav.
+  parent Category? @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
 
   children Category[] @relation("CategoryTree")
 
   products Product[]
 
   @@index([parentId])
-  @@index([slug])
   @@index([sortOrder])
 }
 
@@ -193,7 +200,6 @@ model Brand {
 
   products Product[]
 
-  @@index([slug])
   @@index([sortOrder])
 }
 
@@ -250,14 +256,17 @@ model Product {
 
   wishlists Wishlist[]
 
-  flashSaleItems FlashSaleItem[]
+  orderItems OrderItem[]
 
-  @@index([categoryId])
   @@index([brandId])
-  @@index([status])
-  @@index([slug])
-  @@index([isFeatured])
-  @@index([name])
+  @@index([categoryId, status])
+  @@index([status, isFeatured, createdAt(sort: Desc)])
+  // NOTE: there is deliberately no index on `name`. Search issues
+  // ILIKE '%term%', and a leading wildcard makes a btree unusable — the old
+  // @@index([name]) looked like search support while providing none. A pg_trgm
+  // index would fix it, but Prisma Postgres denies CREATE EXTENSION (42501),
+  // so text search is currently unindexed. See FEATURE.md → Search.
+  @@index([tags], type: Gin)
 }
 
 //////////////////////////////////////////////////////
@@ -329,11 +338,11 @@ model ProductVariant {
   flashSaleItems FlashSaleItem[]
 
   @@unique([productId, name])
-  @@index([productId])
   @@index([price])
   @@index([stock])
-  @@index([isDefault])
-  @@index([isActive])
+  // isDefault is enforced by a partial unique index added in the migration,
+  // which also serves the "default variant for product X" lookup.
+  @@index([productId, isActive])
 }
 
 //////////////////////////////////////////////////////
@@ -422,7 +431,8 @@ model CartItem {
 
   cart Cart @relation(fields: [cartId], references: [id], onDelete: Cascade)
 
-  variant ProductVariant @relation(fields: [variantId], references: [id])
+  // Carts are disposable — an abandoned cart must not block deleting a product.
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
   @@unique([cartId, variantId])
   @@index([variantId])
@@ -488,35 +498,44 @@ model Coupon {
   updatedAt DateTime @updatedAt
 
   orders      Order[]
-  userCoupons UserCoupon[]
+  redemptions CouponRedemption[]
 
   applyWithFlashSale Boolean @default(false)
 
-  @@index([code])
   @@index([startsAt])
   @@index([expiresAt])
-  @@index([isActive])
+  @@index([isActive, expiresAt])
 }
 
-// user coupon
-model UserCoupon {
+// Redemption ledger. Replaces the old UserCoupon.usedCount counter, which was
+// a bare integer with no link to the orders that consumed it — a cancelled
+// order's decrement was a blind guess, and a crash mid-flow left permanent,
+// undetectable drift. Here both Coupon.usedCount and the per-user count are
+// derivable, and replay is race-safe by unique violation rather than
+// read-then-write.
+model CouponRedemption {
   id String @id @default(cuid())
 
-  userId   String
   couponId String
 
-  usedCount Int @default(0)
+  userId String
+
+  orderId String
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, couponId])
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // A replayed checkout cannot double-count.
+  @@unique([couponId, orderId])
+  // Serves the perUserLimit check.
+  @@index([couponId, userId])
   @@index([userId])
-  @@index([couponId])
+  @@index([orderId])
 }
 
 //////////////////////////////////////////////////////
@@ -544,9 +563,8 @@ model FlashSale {
 
   items FlashSaleItem[]
 
-  @@index([startsAt])
-  @@index([endsAt])
-  @@index([isActive])
+  // Serves "sales live right now" — the only query that matters here.
+  @@index([isActive, startsAt, endsAt])
 }
 
 //////////////////////////////////////////////////////
@@ -568,9 +586,10 @@ model FlashSaleItem {
 
   flashSale FlashSale @relation(fields: [flashSaleId], references: [id], onDelete: Cascade)
 
-  variant   ProductVariant @relation(fields: [variantId], references: [id])
-  product   Product?       @relation(fields: [productId], references: [id])
-  productId String?
+  // Reach the product via variant.product. A separate productId was derivable
+  // from the variant and nothing kept the two in agreement, so the storefront
+  // badge query and the cart pricing path could disagree.
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
   @@unique([flashSaleId, variantId])
   @@index([flashSaleId])
@@ -617,9 +636,34 @@ model Order {
 
   userId String
 
-  addressId String
+  // Provenance only. The ship* fields below are the authoritative destination —
+  // Address is user-editable, so a live FK would rewrite historical orders.
+  addressId String?
+
+  shipReceiverName String
+
+  shipPhone String
+
+  shipDivision String
+
+  shipDistrict String
+
+  shipUpazila String
+
+  shipArea String?
+
+  shipAddress String
+
+  shipPostalCode String?
 
   couponId String?
+
+  // Snapshotted so a deleted coupon cannot erase the provenance of `discount`.
+  couponCode String?
+
+  couponDiscountType DiscountType?
+
+  couponDiscountValue Decimal? @db.Decimal(10, 2)
 
   invoiceNo String @unique
 
@@ -647,18 +691,23 @@ model Order {
 
   user User @relation(fields: [userId], references: [id])
 
-  address Address @relation(fields: [addressId], references: [id])
+  address Address? @relation(fields: [addressId], references: [id], onDelete: SetNull)
 
   coupon Coupon? @relation(fields: [couponId], references: [id])
 
   items OrderItem[]
 
-  payment Payment?
+  couponRedemptions CouponRedemption[]
 
-  @@index([userId])
+  // One row per attempt: a failed bKash try, the retry, then a refund all
+  // coexist instead of overwriting each other. Order.paymentStatus is a
+  // derived cache of the resolved state.
+  payments Payment[]
+
+  @@index([addressId])
   @@index([couponId])
-  @@index([orderStatus])
-  @@index([paymentStatus])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([orderStatus, createdAt(sort: Desc)])
 }
 
 //////////////////////////////////////////////////////
@@ -670,7 +719,12 @@ model OrderItem {
 
   orderId String
 
-  variantId String
+  // Nullable so a discontinued variant can be deleted. Order history survives
+  // on the title/sku/unitPrice/image snapshots below; productId keeps the item
+  // traceable to a product once variantId is gone.
+  variantId String?
+
+  productId String?
 
   quantity Int
 
@@ -688,10 +742,13 @@ model OrderItem {
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
-  variant ProductVariant @relation(fields: [variantId], references: [id])
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([orderId])
   @@index([variantId])
+  @@index([productId])
 }
 
 //////////////////////////////////////////////////////
@@ -701,7 +758,7 @@ model OrderItem {
 model Payment {
   id String @id @default(cuid())
 
-  orderId String @unique
+  orderId String
 
   amount Decimal @db.Decimal(10, 2)
 
@@ -709,7 +766,9 @@ model Payment {
 
   status PaymentStatus
 
-  transactionId String?
+  // Idempotency key: bKash and SSLCommerz both retry IPN callbacks on non-2xx,
+  // so replayed webhooks must collide rather than insert a duplicate.
+  transactionId String? @unique
 
   gatewayResponse Json?
 
@@ -720,6 +779,9 @@ model Payment {
   updatedAt DateTime @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([status, createdAt])
 }
 
 //////////////////////////////////////////////////////
@@ -749,6 +811,7 @@ model Review {
 
   @@unique([userId, productId])
   @@index([productId])
+  @@index([userId])
 }
 
 //////////////////////////////////////////////////////
@@ -781,8 +844,7 @@ model Notification {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
-  @@index([isRead])
+  @@index([userId, isRead, createdAt(sort: Desc)])
 }
 
 //////////////////////////////////////////////////////
@@ -810,8 +872,7 @@ model Banner {
 
   updatedAt DateTime @updatedAt
 
-  @@index([sortOrder])
-  @@index([isActive])
+  @@index([isActive, sortOrder])
 }
 
 //////////////////////////////////////////////////////
@@ -819,7 +880,10 @@ model Banner {
 //////////////////////////////////////////////////////
 
 model Setting {
-  id String @id @default(cuid())
+  // Singleton. A CHECK constraint in the migration pins this to one row —
+  // otherwise findFirst() has no ORDER BY and identical carts could resolve
+  // different shipping charges depending on which row the planner returns.
+  id String @id @default("singleton")
 
   storeName String?
 

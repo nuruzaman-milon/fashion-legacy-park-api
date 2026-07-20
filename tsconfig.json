@@ -12,5 +12,11 @@
     "skipLibCheck": true,
 
     "forceConsistentCasingInFileNames": true
-  }
+  },
+
+  // Without this, the default "**/*" include pulls prisma.config.ts (repo root)
+  // into the program, which then sits outside rootDir and fails the build.
+  // The Prisma CLI loads that file itself; it is not part of the dist output.
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
 }

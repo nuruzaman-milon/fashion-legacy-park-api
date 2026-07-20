@@ -1,10 +1,6 @@
 # Feature Capability Map
 
-What the **current** `prisma/schema.prisma` can and cannot support.
-
-Use this to check your requirements against reality: go section by section, and
-wherever your requirement hits a ❌ or ⚠️, that is a schema change you need to
-plan before writing the service for it.
+What the current `prisma/schema.prisma` can and cannot support.
 
 | | Meaning |
 |---|---|
@@ -12,9 +8,23 @@ plan before writing the service for it.
 | ⚠️ | **Partial.** Buildable, but with a real limitation you should know about. |
 | ❌ | **Not possible.** Needs a schema change first. |
 
-> Status as of migration `20260720134417_integrity_fixes`.
-> Nothing here is built yet — `src/` contains only stub auth controllers.
-> This describes what the **data model** allows, not what exists in code.
+> Status as of migration `20260720161237_marketplace_v2`.
+> Nothing is built yet — `src/` contains only stub auth controllers. This
+> describes what the **data model** allows, not what exists in code.
+
+---
+
+## Business model
+
+**Supplier portal, single-brand storefront.**
+
+Sellers are external suppliers with their own admin panel. They manage their own
+catalogue and see their own sales and earnings. The customer-facing storefront
+never exposes them — every product is presented as Aydin Bazar's own. There are
+no seller storefronts, no "Sold by X" badges, and no seller filters on search.
+
+Settlement is per-order: each sold line writes a `SellerLedger` row with the
+commission rate snapshotted, and rows are grouped into `Payout` records.
 
 ---
 
@@ -22,378 +32,326 @@ plan before writing the service for it.
 
 | Feature | | Notes |
 |---|---|---|
-| Email + password register / login | ✅ | `Account.password` with `provider = EMAIL` |
-| Google / Facebook login | ✅ | `Account.providerAccountId`; one user can link several providers |
-| Multiple login methods on one account | ✅ | `User` 1→N `Account` |
-| Refresh token rotation | ✅ | `RefreshToken` with `expiresAt` |
-| Server-side logout / revoke session | ✅ | `RefreshToken.revoked` — tokens are DB rows, so you can kill a session |
-| Role-based access (admin vs customer) | ✅ | `Role` enum |
-| Ban / deactivate a user | ✅ | `User.isActive` |
-| **Email verification** | ❌ | `User.isVerified` exists but **nothing can ever set it to true** — no token table |
-| **Password reset** | ❌ | No token storage at all |
-| Phone / OTP login | ❌ | No OTP table; `User.phone` exists but is unverifiable |
-| Force logout on password change | ❌ | Needs `User.passwordChangedAt` to compare against token issue time |
-| Staff / vendor / manager roles | ❌ | `Role` has only `ADMIN` and `CUSTOMER` |
+| Email + password register / login | ✅ | `Account.password`, `provider = EMAIL` |
+| Google / Facebook login | ✅ | One user can link several providers |
+| **Email verification** | ✅ | `VerificationToken` + `User.emailVerifiedAt` |
+| **Password reset** | ✅ | `VerificationToken` with `type = PASSWORD_RESET` |
+| **Force logout on password change** | ✅ | `User.passwordChangedAt` — reject every token issued before it, no need to enumerate sessions |
+| Server-side logout / revoke session | ✅ | `RefreshToken.revoked` |
+| Token theft resistance | ✅ | Tokens are stored **hashed**, so a DB leak does not hand over live sessions |
+| **Multi-role** | ✅ | `SUPER_ADMIN` / `ADMIN` / `SELLER` / `CUSTOMER` |
+| Ban / deactivate | ✅ | `User.isActive` |
+| Login audit | ✅ | `User.lastLoginAt`, `RefreshToken.userAgent` / `ipAddress` |
+| Phone / OTP login | ❌ | `phoneVerifiedAt` exists but `TokenType` has no `PHONE_OTP` |
+| Per-permission custom roles | ❌ | Role is a fixed enum. `SUPER_ADMIN` vs `ADMIN` must be enforced in code |
 
-**Needed model:**
-
-```prisma
-enum TokenType { EMAIL_VERIFICATION, PASSWORD_RESET }
-
-model VerificationToken {
-  id         String    @id @default(cuid())
-  userId     String?
-  identifier String                   // email the token was sent to
-  tokenHash  String    @unique        // store a hash, never the raw token
-  type       TokenType
-  expiresAt  DateTime
-  consumedAt DateTime?
-  createdAt  DateTime  @default(now())
-  @@index([identifier, type])
-}
-```
-
-> ⚠️ **Security note:** `RefreshToken.token` stores the **raw** token. If the
-> database ever leaks, every live session is directly usable by the attacker.
-> Store a hash instead and look up by hash. Cheap to change now, hard later.
+> **Application rule:** `passwordChangedAt` only works if every token check
+> compares `RefreshToken.createdAt >= user.passwordChangedAt`. The schema
+> cannot enforce that — it must be in the auth service.
 
 ---
 
-## 2. Catalog — Category, Brand, Product
+## 2. Seller / Supplier Portal
 
 | Feature | | Notes |
 |---|---|---|
-| Unlimited nested categories | ✅ | Self-relation `CategoryTree` |
-| Category icon / image / banner / sort order | ✅ | |
-| Brands with logo | ✅ | |
-| SEO meta on category, brand, product | ✅ | `metaTitle` / `metaDescription` / `metaKeywords` |
-| Product draft → publish workflow | ✅ | `ProductStatus` |
-| Featured products | ✅ | `Product.isFeatured` |
-| Multiple product images, one primary | ✅ | Primary is DB-enforced (one per product) |
-| Product video | ✅ | `Product.videoUrl` |
-| Free-text spec sheet | ✅ | `Product.specifications Json` (display only) |
-| Tags | ✅ | GIN-indexed, so tag filtering is fast |
-| Per-variant SKU / barcode / price / stock / weight | ✅ | |
-| Strike-through "was" price | ✅ | `ProductVariant.comparePrice` |
-| Profit margin reporting | ✅ | `ProductVariant.costPrice` |
-| Category delete safety | ✅ | Restricted — can't orphan a subtree |
-| **Color × Size variant picker** | ⚠️ | **See below — most important item in this document** |
-| Filterable product attributes | ❌ | `specifications` is JSON — cannot be filtered or indexed |
-| Variant-specific image gallery | ❌ | `ProductVariant.imageUrl` is a *single* image; `ProductImage` has no `variantId`, so picking "Red" can't swap the gallery |
-| Related / cross-sell products | ❌ | No self-relation on `Product` |
-| Product bundles / combos | ❌ | |
-| Digital / downloadable products | ❌ | |
+| Seller onboarding + approval | ✅ | `SellerStatus`: PENDING → APPROVED / SUSPENDED / REJECTED |
+| Seller manages own catalogue | ✅ | `Product.sellerId`, scoped queries |
+| **Product approval before going live** | ✅ | `PENDING_APPROVAL` → `ACTIVE` / `REJECTED`, with `rejectionReason` |
+| Seller sees own products & sales | ✅ | `@@index([sellerId, status])`, `OrderItem.sellerId` |
+| **Per-order commission** | ✅ | `SellerLedger` — rate **snapshotted**, so changing a seller's rate never rewrites past earnings |
+| Payout batches | ✅ | `Payout` with period range, method, transaction ref |
+| Payable vs pending earnings | ✅ | `LedgerStatus`: PENDING → PAYABLE → PAID / CANCELLED |
+| Bank / bKash payout details | ✅ | On `Seller` |
+| Storefront hides sellers | ✅ | By design — no seller field is ever queried on the storefront |
+| Seller-uploaded product images | ✅ | Via `ProductImage` |
+| Seller-specific shipping rules | ❌ | Shipping is store-wide |
+| Seller performance ratings | ❌ | |
 
-### ⚠️ The variant modelling limitation
-
-`ProductVariant.name` is a **flat string** (`"Red / L"`). The database does not
-know that `"Red / L"` and `"Red / M"` share a colour.
-
-**What this blocks:**
-
-- **Faceted filtering** — "show all Red items in size L" needs
-  `name LIKE '%Red%'`: a full table scan, unindexable, and wrong the moment a
-  product is called *"Red Velvet Cake"* or someone types `"L / Red"`.
-- **Filter counts** — `Color: Red (24) · Blue (11)` cannot be computed.
-- **The swatch picker** — the normal product page has a Colour row and a Size
-  row, where choosing Red *disables* sizes not stocked in Red. With a flat
-  string you only get one long dropdown of every combination.
-- **Swatch colours and size order** — nowhere to store a hex code, so sizes sort
-  alphabetically as `L, M, S, XL` instead of `S, M, L, XL`.
-- **Spelling consistency** — `"Red"`, `"red"`, `"RED"` all become separate
-  filter entries.
-
-**You said products will be Color × Size, so this needs fixing.** It is the one
-change on this list that gets dramatically more expensive later: retrofitting
-means heuristically parsing every historical `name` string, hand-fixing the
-misses, and backfilling `OrderItem`. Right now the catalog is empty, so it is a
-schema edit and an admin-form change — nothing more.
-
-```prisma
-model ProductOption {          // "Color", "Size" — per product
-  id        String @id @default(cuid())
-  productId String
-  name      String
-  sortOrder Int    @default(0)
-  values    ProductOptionValue[]
-  @@unique([productId, name])
-}
-
-model ProductOptionValue {     // "Red", "L"
-  id        String  @id @default(cuid())
-  optionId  String
-  value     String
-  hexColor  String?            // swatch
-  sortOrder Int     @default(0)
-  @@unique([optionId, value])
-}
-
-model ProductVariantOption {   // this variant IS Red + L
-  variantId String
-  valueId   String
-  @@id([variantId, valueId])
-  @@index([valueId])
-}
-```
-
-`ProductVariant.name` stays as the display label (`"Red / L"`), generated from
-the selected values — so invoices and `OrderItem` snapshots keep working.
+> **Settlement correctness is DB-enforced:** `netPayable = grossAmount −
+> commissionAmount`, commission cannot exceed gross, and commission rate is
+> capped at 0–100%. A bad calculation is rejected rather than silently paid out.
 
 ---
 
-## 3. Search & Discovery
+## 3. Catalog — Category, Brand, Product, Variants
 
 | Feature | | Notes |
 |---|---|---|
-| Browse by category / brand | ✅ | Composite indexes in place |
+| Unlimited nested categories | ✅ | Deleting a parent is blocked, so no orphaned subtree |
+| Brands | ✅ | |
+| SEO meta everywhere | ✅ | |
+| Draft → approval → publish | ✅ | |
+| Featured products | ✅ | |
+| **Color × Size variants** | ✅ | Dress: Red/S, Red/L, Blue/S… each with its own stock and price |
+| **Weight / volume variants** | ✅ | Shampoo: 250gm, 500gm — different price and stock |
+| **Any option combination** | ✅ | A product declares which options it uses; variants are combinations |
+| **Consistent option spelling** | ✅ | Global library — sellers pick from a dropdown, so "Red"/"red"/"RED" cannot diverge |
+| **Colour swatches** | ✅ | `OptionValue.hexColor`, `Option.displayType = SWATCH` |
+| **Correct size ordering** | ✅ | `OptionValue.sortOrder` — S, M, L, XL instead of alphabetical L, M, S, XL |
+| **Store-wide faceted filter** | ✅ | "All Red items in size L" is an indexed join, not a `LIKE` over a display string |
+| **Colour-scoped image gallery** | ✅ | `ProductImage.optionValueId` — selecting Red swaps the gallery, without duplicating photos across S/M/L/XL |
+| Strike-through "was" price | ✅ | `comparePrice` |
+| Margin reporting | ✅ | `costPrice`, never exposed to customers |
+| Low-stock threshold | ✅ | `lowStockThreshold` |
+| **Stock reservation during checkout** | ✅ | `reservedStock`, DB-capped so it can never exceed real stock |
+| Filterable product attributes (non-variant) | ⚠️ | `specifications Json` is display-only. For filtering, model it as an Option instead |
+| Related / cross-sell products | ❌ | |
+| Product bundles | ❌ | |
+| Digital products | ❌ | |
+
+### How the variant model works
+
+```
+Option ("Color", SWATCH)          global, defined once
+  └── OptionValue ("Red", #FF0000, sortOrder 1)
+
+Product "Kurti"
+  ├── ProductOption → Color  (sortOrder 1)
+  ├── ProductOption → Size   (sortOrder 2)
+  ├── ProductVariant "Red / S"  sku K-RED-S  ৳1200  stock 10
+  │     └── ProductVariantOption → Red, S
+  └── ProductVariant "Red / L"  sku K-RED-L  ৳1250  stock 5
+        └── ProductVariantOption → Red, L
+```
+
+`ProductVariant.name` is a generated display label for invoices. The
+authoritative structure is `ProductVariantOption`, which is what filtering
+queries join against.
+
+---
+
+## 4. Search & Discovery
+
+| Feature | | Notes |
+|---|---|---|
+| Browse by category / brand | ✅ | |
 | Filter by tag | ✅ | GIN index |
-| Featured / newest listings | ✅ | `@@index([status, isFeatured, createdAt DESC])` |
-| Sort by price | ⚠️ | Price lives on the **variant**, so product-level sorting has to aggregate in memory — breaks past a few hundred products |
-| Text search ("shirt") | ⚠️ | **Works but is unindexed** — every search is a full table scan |
-| Sort by rating / best-selling | ❌ | Needs denormalized counters on `Product` |
-| Price-range filter | ❌ | Needs `minPrice` / `maxPrice` on `Product` |
-| Filter counts in the sidebar | ❌ | Needs the structured options from §2 |
-| Autocomplete / "did you mean" | ❌ | |
+| **Sort by price** | ✅ | `Product.minPrice` / `maxPrice`, indexed |
+| **Price-range filter** | ✅ | Same fields — this is the selling price |
+| **Sort by rating** | ✅ | `Product.avgRating`, indexed |
+| **Sort by best-selling** | ✅ | `Product.soldCount`, indexed |
+| Sort by newest | ✅ | `publishedAt`, indexed |
+| Filter by colour / size across the store | ✅ | Via the option library |
+| In-stock filter | ✅ | `Product.totalStock` |
+| **Text search ("shirt")** | ⚠️ | **Works but unindexed** — every search is a full table scan |
+| Filter counts in the sidebar | ✅ | Joinable via `ProductVariantOption` |
+| Autocomplete / typo tolerance | ❌ | |
 
-### The search index problem
+> ⚠️ **The denormalised fields are maintained by application code, not the
+> database.** `minPrice`, `maxPrice`, `totalStock`, `soldCount`, `avgRating`,
+> `reviewCount` must be recalculated whenever a variant price/stock changes, an
+> order completes, or a review is approved. If you forget, listings silently go
+> stale. Put this in a shared service, not in individual controllers.
 
-The old `@@index([name])` was removed because it was **misleading** — search
-issues `ILIKE '%term%'`, and a leading wildcard makes a btree unusable. It
-looked like search support while providing none.
-
-The normal fix is a `pg_trgm` trigram index, **but Prisma Postgres denies
-`CREATE EXTENSION`** (verified: error `42501`, only `plpgsql` and
-`prisma_postgres` are installed). Your options:
-
-1. **Postgres full-text search** — `tsvector` + GIN. Core Postgres, *no
-   extension needed*, so it works on your current hosting. Best value.
-   (Note: Postgres has no Bangla dictionary — use the `simple` config.)
-2. **Move to a Postgres host that allows extensions** (Neon, Supabase, self-hosted)
-   and use trigram search, which handles typos better.
-3. **A search engine** (Meilisearch / Typesense) — only worth it past ~50k
-   products or if you need Bangla stemming.
-
-**Recommended denormalized fields on `Product`** (maintained by app code —
-these unlock price sort, rating sort, and best-seller sort, none of which are
-possible today):
-
-```prisma
-minPrice    Decimal? @db.Decimal(10, 2)
-maxPrice    Decimal? @db.Decimal(10, 2)
-avgRating   Float    @default(0)
-reviewCount Int      @default(0)
-totalStock  Int      @default(0)
-soldCount   Int      @default(0)
-publishedAt DateTime?
-```
+> ⚠️ **Text search has no index.** `pg_trgm` is unavailable — Prisma Postgres
+> denies `CREATE EXTENSION` (verified: error `42501`). Options:
+> 1. **Postgres full-text search** (`tsvector` + GIN) — core Postgres, no
+>    extension needed, works on your current host. Use the `simple` config;
+>    there is no Bangla dictionary.
+> 2. Move to a host that allows extensions (Neon, Supabase, self-hosted).
+> 3. A search engine — only past ~50k products.
+>
+> With an empty catalogue `ILIKE` is genuinely fine for now. Revisit before the
+> catalogue grows.
 
 ---
 
-## 4. Cart & Wishlist
+## 5. Cart & Wishlist — login required by design
 
 | Feature | | Notes |
 |---|---|---|
-| One cart per logged-in user | ✅ | |
-| Add / update quantity / remove | ✅ | `@@unique([cartId, variantId])` prevents duplicate lines |
-| Wishlist | ✅ | One entry per user+product |
-| Cart survives logout/login | ✅ | Server-side, not a cookie |
-| Live price in cart | ✅ | Cart deliberately does **not** snapshot price, so it always shows current price |
-| **Guest cart** | ❌ | `Cart.userId` is **required** — anonymous visitors cannot hold a cart |
-| Merge guest cart on login | ❌ | Depends on the above |
-| Abandoned-cart recovery | ❌ | No `expiresAt`, no way to find stale carts |
-| "Save for later" | ❌ | |
+| Cart per logged-in user | ✅ | |
+| Add / update / remove | ✅ | Duplicate lines impossible |
+| Wishlist | ✅ | |
+| Cart survives logout / login | ✅ | Server-side |
+| Live price in cart | ✅ | Price deliberately not snapshotted |
+| Guest cart / wishlist | ❌ | **Intentional** — login is required |
+| Abandoned-cart recovery | ❌ | No `expiresAt` |
+| Save for later | ❌ | |
 
 ---
 
-## 5. Checkout & Orders
+## 6. Checkout & Orders
 
 | Feature | | Notes |
 |---|---|---|
-| Multiple saved addresses | ✅ | One default per user, **DB-enforced** |
-| Bangladesh address format | ✅ | division / district / upazila / area |
-| Order with invoice number | ✅ | `invoiceNo @unique` |
-| Price breakdown | ✅ | subtotal / discount / shippingCharge / total |
-| **Correct historical invoices** | ✅ | `OrderItem` snapshots title/sku/price/image, and `Order` snapshots the full ship-to address — editing a product or address later cannot rewrite past orders |
-| Order lifecycle | ✅ | 7 states, PENDING → DELIVERED / CANCELLED / RETURNED |
-| Tracking number | ✅ | Plain string field |
-| Order notes | ✅ | |
-| **Guest checkout** | ❌ | `Order.userId` is **required**. Note `Order.email`/`phone` already exist, which suggests this was originally intended |
-| **Order status timeline** | ❌ | Only the *current* status is stored. No "Placed 12 Jul → Shipped 13 Jul" tracking, no record of who cancelled or why |
-| **Returns / refunds** | ❌ | `RETURNED` and `REFUNDED` exist as enum values with **no table behind them** — you cannot record which items came back, why, or how much was refunded |
-| Tax / VAT | ❌ | No tax field. Add `tax Decimal @default(0)` now even if unused — retrofitting makes every historical total un-decomposable |
-| Flexible shipping rates | ⚠️ | `Setting` hardcodes only inside-Dhaka / outside-Dhaka. No per-district rates, no weight-based charge (`ProductVariant.weight` is captured but unused), no express option, no COD surcharge |
-| Partial shipment | ❌ | |
-| Courier integration (Pathao / Steadfast / RedX) | ❌ | `trackingNumber` is a bare string with no courier name |
-
-> 💡 **Guest checkout is now half-done.** `Order.addressId` was already made
-> optional during the integrity migration, which was the hard part. What
-> remains: make `Order.userId` and `Cart.userId` nullable and add
-> `Cart.sessionId`.
+| Multiple saved addresses | ✅ | One default per user, DB-enforced |
+| Bangladesh address format | ✅ | division / district / upazila |
+| **Correct historical invoices** | ✅ | Order snapshots the ship-to address; OrderItem snapshots title/variant/sku/price/image. Editing a product or address cannot rewrite the past |
+| **Tax / VAT** | ✅ | `Order.tax` + `taxRate` snapshot; `Setting.vatRate` / `vatEnabled` |
+| **Order status timeline** | ✅ | `OrderStatusHistory` with from→to, who changed it, and `isPublic` to hide internal notes |
+| Milestone timestamps | ✅ | `confirmedAt` / `shippedAt` / `deliveredAt` / `cancelledAt` for dashboards |
+| Cancel with reason | ✅ | `cancelReason`, `cancelledById` |
+| Guest checkout | ❌ | **Intentional** — login required |
+| Order money sanity | ✅ | No component of an order total can go negative |
+| Flexible shipping rates | ⚠️ | `Setting` still has only inside/outside-Dhaka. No per-district, weight-based, or express rates |
+| Partial shipment | ⚠️ | Multiple `Shipment` rows per order are allowed, but items are not assigned to a specific shipment |
 
 ---
 
-## 6. Payments
+## 7. Shipping & Courier
+
+| Feature | | Notes |
+|---|---|---|
+| **Pathao / Steadfast / RedX / Paperfly / Sundarban** | ✅ | `Courier` enum, plus `MANUAL` |
+| Consignment / tracking id | ✅ | |
+| **Safe courier webhooks** | ✅ | `@@unique([courier, consignmentId])` — a replayed callback collides instead of creating a duplicate shipment |
+| Full courier status history | ✅ | `ShipmentStatusLog` keeps the courier's raw status string and payload |
+| COD amount + delivery fee | ✅ | |
+| Shipping label / tracking URL | ✅ | |
+| Automatic rate lookup | ❌ | Needs the shipping-zone model |
+| Items assigned per shipment | ❌ | |
+
+---
+
+## 8. Payments & Refunds
 
 | Feature | | Notes |
 |---|---|---|
 | COD, bKash, SSLCommerz | ✅ | |
-| **Retry after a failed payment** | ✅ | One `Payment` row per attempt — a failed bKash try, the retry, and a refund all coexist instead of overwriting each other |
-| **Safe webhook replay** | ✅ | `transactionId @unique` — bKash and SSLCommerz both retry IPN callbacks, and a duplicate now collides instead of double-inserting |
+| Retry after failed payment | ✅ | One `Payment` row per attempt — the failure and its gateway payload survive |
+| Safe webhook replay | ✅ | `transactionId @unique` |
 | Full gateway audit trail | ✅ | `gatewayResponse Json` per attempt |
-| Payment reconciliation reports | ✅ | `@@index([status, createdAt])` |
-| Refund records | ❌ | Setting `status = REFUNDED` **overwrites** the successful capture. You lose proof of what was originally taken. Needs a separate `Refund` table |
+| **Refund records** | ✅ | Separate `Refund` table — refunding does **not** overwrite the capture, so proof of what was taken survives |
+| Partial refunds | ✅ | Multiple `Refund` rows; `PARTIALLY_REFUNDED` status |
+| Refund linked to a return | ✅ | `Refund.returnRequestId` |
+| Refund amount sanity | ✅ | Zero/negative refunds rejected |
 | Partial payment / installment | ❌ | |
 | Wallet / store credit | ❌ | |
 
 ---
 
-## 7. Promotions — Coupons & Flash Sales
+## 9. Returns
 
 | Feature | | Notes |
 |---|---|---|
-| Percentage or fixed-amount coupon | ✅ | |
-| Minimum order / maximum discount cap | ✅ | |
-| Total usage limit | ✅ | **DB-enforced** — cannot exceed the cap |
-| Per-user usage limit | ✅ | Counted from `CouponRedemption`, so it is accurate |
-| Date-windowed campaigns | ✅ | `startsAt` / `expiresAt` |
-| **Safe against double-redemption** | ✅ | `@@unique([couponId, orderId])` — a replayed checkout cannot double-count |
-| Discount provenance on old orders | ✅ | `Order.couponCode` snapshot survives coupon deletion |
-| Flash sale with countdown | ✅ | `@@index([isActive, startsAt, endsAt])` |
-| Per-variant sale price + quantity cap | ✅ | Cap is DB-enforced |
-| Coupon stacking control with flash sales | ✅ | `Coupon.applyWithFlashSale` |
-| Category- or product-scoped coupons | ❌ | Coupons are store-wide only — no "20% off Electronics" |
-| Free-shipping coupon | ❌ | `DiscountType` has only `PERCENTAGE` and `FIXED` |
+| Customer return request | ✅ | `ReturnRequest` with reference, reason, photos |
+| **Partial returns** | ✅ | `ReturnItem` — 2 of 5 items can come back |
+| Return approval workflow | ✅ | REQUESTED → APPROVED / REJECTED → RECEIVED → REFUNDED |
+| Restock tracking | ✅ | `ReturnItem.restocked` |
+| Return window config | ✅ | `Setting.returnWindowDays` — also gates when seller earnings become PAYABLE |
+| Return reasons | ✅ | DAMAGED / WRONG_ITEM / SIZE_ISSUE / QUALITY_ISSUE / … |
+| Return shipping labels | ❌ | |
+
+---
+
+## 10. Promotions
+
+| Feature | | Notes |
+|---|---|---|
+| Percentage / fixed coupon | ✅ | Percentage capped at 100%, DB-enforced |
+| **Free-shipping coupon** | ✅ | `DiscountType.FREE_SHIPPING` |
+| **Category-scoped coupon** | ✅ | `CouponCategory` |
+| **Product-scoped coupon** | ✅ | `CouponProduct` |
+| Store-wide coupon | ✅ | Attach neither → applies everywhere |
+| Usage limits (total + per user) | ✅ | Total limit DB-enforced; per-user counted from the redemption ledger |
+| No double-redemption | ✅ | `@@unique([couponId, orderId])` — a replayed checkout cannot double-count |
+| Discount provenance on old orders | ✅ | `Order.couponCode` survives coupon deletion |
+| **Flash sale by category** | ✅ | `FlashSaleRule` with `scope = CATEGORY` — products added later join automatically |
+| **Flash sale by product / variant** | ✅ | Same table, different scope |
+| Rule integrity | ✅ | A rule must target exactly one thing matching its scope — DB-enforced |
+| Per-variant quantity cap | ✅ | `FlashSaleItem.quantityLimit` + `soldCount`, cap DB-enforced |
+| Sale period sanity | ✅ | `endsAt > startsAt` enforced |
 | First-order-only coupon | ❌ | |
 | BOGO / tiered discounts | ❌ | |
-| Gift cards / loyalty points | ❌ | |
-| Overlapping flash sales on one variant | ⚠️ | Nothing prevents two *concurrent* sales containing the same variant — the pricing resolver would get two valid prices with no tiebreak. Enforce in app code, or add an exclusion constraint |
+| Gift cards / loyalty | ❌ | |
 
----
+### Flash sale price resolution
 
-## 8. Reviews & Ratings
+Several rules can match one variant. Priority — **application code must
+implement this**, the schema only stores the rules:
 
-| Feature | | Notes |
-|---|---|---|
-| Star rating with comment | ✅ | Rating is **DB-constrained to 1–5** |
-| Review photos | ✅ | `Review.images` |
-| One review per user per product | ✅ | |
-| **Moderation before publishing** | ❌ | No `status` field — **reviews and their images go live instantly**. Anyone can publish arbitrary images onto your product pages |
-| "Verified Purchase" badge | ❌ | No link to an order, so any registered user can review a product they never bought — the standard fake-review vector |
-| Admin reply to a review | ❌ | |
-| Helpful / unhelpful votes | ❌ | |
-| Average rating on listings | ❌ | Must aggregate across all reviews on every page load |
-| Second review after re-purchase | ❌ | `@@unique([userId, productId])` blocks it |
-
-**Minimum fix:**
-
-```prisma
-enum ReviewStatus { PENDING, APPROVED, REJECTED }
-
-model Review {
-  status       ReviewStatus @default(PENDING)
-  orderItemId  String?      @unique   // proves purchase
-  isVerified   Boolean      @default(false)
-  adminReply   String?
-  @@index([productId, status, createdAt])
-}
+```
+VARIANT rule  >  PRODUCT rule  >  CATEGORY rule
 ```
 
+⚠️ Two **concurrently active** flash sales can both contain the same variant.
+Nothing prevents it, so the resolver needs a deterministic tiebreak (most
+recent sale, or highest discount) — otherwise pricing is non-deterministic.
+
 ---
 
-## 9. Content & Store Settings
+## 11. Reviews & Ratings
 
 | Feature | | Notes |
 |---|---|---|
-| Homepage banners (desktop + mobile) | ✅ | With CTA button, sort order, active flag |
-| Store name / logo / favicon | ✅ | |
-| Social links, support email & phone | ✅ | |
-| Currency + symbol | ✅ | Single currency only |
-| Facebook Pixel / Google Analytics IDs | ✅ | |
+| Star rating + comment + photos | ✅ | Rating DB-constrained to 1–5 |
+| **Moderation before publishing** | ✅ | Defaults to `PENDING`, so user-uploaded images never hit product pages unreviewed |
+| **Verified purchase badge** | ✅ | `Review.orderItemId` proves the purchase |
+| **Second review after re-purchase** | ✅ | Keyed on the purchased line, not on (user, product) |
+| One review per purchased line | ✅ | `orderItemId @unique` |
+| **Average rating on listings** | ✅ | `Product.avgRating` + `reviewCount`, indexed for sorting |
+| Admin reply | ✅ | |
+| Helpful votes | ✅ | Counter field present |
+
+> ⚠️ `avgRating` and `reviewCount` are **not** auto-calculated. Recompute them
+> when a review is approved, edited, or rejected.
+
+---
+
+## 12. Content, Notifications, Settings
+
+| Feature | | Notes |
+|---|---|---|
+| Homepage banners | ✅ | |
+| **CMS pages** | ✅ | `Page` — Terms / Privacy / Refund Policy. **Required for bKash and SSLCommerz merchant onboarding** |
+| Store settings singleton | ✅ | DB-pinned to exactly one row |
+| Currency, social links, pixel IDs | ✅ | Single currency |
 | Maintenance mode | ✅ | |
-| Shipping charge config | ⚠️ | Only the two hardcoded Dhaka fields |
-| **CMS pages (Terms / Privacy / Refund Policy)** | ❌ | ⚠️ **bKash and SSLCommerz merchant onboarding require live policy pages on your domain.** This blocks payment-gateway approval, not code |
-| Blog / articles | ❌ | |
-| FAQ | ❌ | |
-| Contact form submissions | ❌ | |
-| Newsletter subscribers | ❌ | |
+| In-app notifications | ✅ | Typed, incl. `SELLER` |
+| Shipping charge config | ⚠️ | Only inside/outside Dhaka |
+| Email / SMS delivery log | ❌ | |
+| Blog / FAQ | ❌ | |
+| Contact form / newsletter | ❌ | |
+| Admin audit log | ❌ | `*ById` audit columns exist on key tables, but there is no general log |
 
 ---
 
-## 10. Notifications
+## What is left
 
-| Feature | | Notes |
+### 🟡 Worth doing before launch
+
+| # | Item | Why |
 |---|---|---|
-| In-app notifications, typed | ✅ | SYSTEM / ORDER / PAYMENT / PROMOTION |
-| Read / unread with deep link | ✅ | Indexed for the notification dropdown |
-| Email / SMS / push delivery log | ❌ | No record of what was actually sent |
-| Reusable templates | ❌ | |
-
----
-
-## 11. Admin & Operations
-
-| Feature | | Notes |
-|---|---|---|
-| Admin role | ✅ | |
-| Order queue by status | ✅ | `@@index([orderStatus, createdAt DESC])` |
-| Stock tracking | ✅ | **`stock` can never go negative** — DB-enforced, so a flash sale cannot silently oversell |
-| Low-stock alerts | ❌ | No `lowStockThreshold` |
-| Stock reservation during checkout | ❌ | Two customers can both reach payment for the last unit — nothing holds stock between "add to cart" and "payment confirmed" |
-| Stock movement history | ❌ | Cannot answer "why is stock 3 when I received 50?" |
-| Backorder / pre-order | ❌ | |
-| Admin audit log | ❌ | No record of who changed a price or cancelled an order |
-| Granular permissions | ❌ | Admin is all-or-nothing |
-| Multi-vendor marketplace | ❌ | Large change — decide **early** if you ever want it |
-
----
-
-## Priority Summary
-
-### 🔴 Do before writing more services — these change column shapes
-
-Once services are written against the current shape, changing it means
-rewriting those services too.
-
-| # | Change | Why now |
-|---|---|---|
-| 1 | **Structured variant options** (§2) | You confirmed Color × Size. Retrofitting means parsing every historical variant name by guesswork |
-| 2 | **`VerificationToken`** (§1) | `isVerified` can never become true, and there is no password reset. Blocks the auth module you are building **right now** |
-| 3 | **Guest checkout nullability** (§4, §5) | Forced registration before COD is a well-known conversion killer in BD. Half-done already |
-| 4 | **`Order.tax`** (§5) | One line of insurance, even if always zero |
-| 5 | **Hash `RefreshToken.token`** (§1) | Free today; a DB leak hands over live sessions |
-
-### 🟡 Before launch — purely additive, safe to defer a little
-
-| # | Change | Why |
-|---|---|---|
-| 6 | **CMS `Page` model** (§9) | bKash / SSLCommerz onboarding needs live policy pages |
-| 7 | **Review moderation** (§8) | Right now anyone can publish images to your product pages |
-| 8 | **Returns / refunds tables** (§5, §6) | COD markets have high return rates; spreadsheets are how reconciliation breaks |
-| 9 | **`OrderStatusHistory`** (§5) | Customers expect a tracking timeline |
-| 10 | **Denormalized `Product` counters** (§3) | Price sort, rating sort, best-seller sort are all impossible without them |
-| 11 | **Shipping zones** (§5) | Seed with two zones and behaviour is identical — but checkout is then written against a rate resolver instead of `if (district === 'Dhaka')` |
-| 12 | **Full-text search** (§3) | Search is a full table scan today |
+| 1 | **Full-text search index** | Search is a full table scan today (§4) |
+| 2 | **Shipping zones** | Only two hardcoded Dhaka rates. `ProductVariant.weight` is captured but unused (§6) |
+| 3 | **Denormalised-field service** | `minPrice` / `avgRating` / `soldCount` / `totalStock` go stale unless recalculated centrally (§4) |
+| 4 | **Flash sale tiebreak logic** | Overlapping sales are pricing-ambiguous (§10) |
+| 5 | **Phone OTP** | Add `PHONE_OTP` to `TokenType` if you want phone signup (§1) |
 
 ### 🟢 Safe to defer
 
-Courier integration · stock movement ledger · related products · coupon scoping ·
-newsletter & contact forms · admin audit log · helpful votes · abandoned-cart
-recovery · dedicated search engine · multi-currency · gift cards & loyalty ·
-product Q&A · bundles · subscriptions
+Related products · product bundles · first-order coupons · BOGO · gift cards &
+loyalty · wallet / store credit · abandoned-cart recovery · email & SMS delivery
+logs · blog & FAQ · contact form · newsletter · admin audit log · per-permission
+custom roles · seller performance ratings · return shipping labels · dedicated
+search engine · multi-currency
 
-### ⚪ Decide early (expensive to add later)
+### ⚪ Decide before you outgrow it
 
-- **Multi-vendor?** Touches products, orders, payouts, and permissions everywhere.
-- **Multi-currency?** Every `Decimal` column would need a currency companion.
+- **Multi-currency** — every `Decimal` would need a currency companion.
+- **Per-permission roles** — if `ADMIN` needs to be split into finer staff
+  roles, `User.role` becomes a join table.
 
 ---
 
-## How to use this with your requirements
+## Rules the database cannot enforce
 
-1. Go through your requirement list section by section.
-2. Every requirement landing on ❌ or ⚠️ is a schema change — put it in the
-   🔴 bucket if it changes an existing column, 🟡 if it only adds new tables.
-3. Anything in 🔴 should be done **before** the matching service code exists.
+These are correctness requirements the schema **assumes** the application
+upholds. Each one is a silent-corruption bug if missed:
 
-If a requirement isn't listed here at all, it probably needs new models — worth
-checking before you start building against the current schema.
+1. **Refresh token check** must compare against `User.passwordChangedAt`, or
+   "force logout on password change" does nothing.
+2. **Denormalised product fields** must be recalculated on the writes that
+   affect them.
+3. **`Order.paymentStatus` / `orderStatus`** are caches of the Payment and
+   Shipment ledgers — update them in the *same transaction* as the underlying
+   write, never separately.
+4. **Stock decrement** must use a conditional update
+   (`updateMany where stock >= qty`), not read-then-write. The CHECK constraint
+   is the last line of defence, not the first.
+5. **`SellerLedger` rows** are written at order time and moved to `PAYABLE`
+   only after the return window closes.
+6. **Flash sale resolution priority** (VARIANT > PRODUCT > CATEGORY) lives
+   entirely in code.

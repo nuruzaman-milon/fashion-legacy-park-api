@@ -7,12 +7,29 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-//////////////////////////////////////////////////////
-// ENUMS
-//////////////////////////////////////////////////////
+// =====================================================================
+// CONVENTIONS
+//
+// * Money is Decimal(10,2). Prisma returns Decimal objects, not numbers --
+//   convert explicitly before arithmetic or JSON serialisation.
+// * Historical records (Order, OrderItem, SellerLedger) SNAPSHOT the values
+//   they depend on. Editing a product, address, coupon or commission rate must
+//   never rewrite a past order.
+// * Audit columns named *ById hold a User id but carry NO foreign key on
+//   purpose -- they would otherwise need a dozen back-relations on User and
+//   would block deleting a staff account.
+// * Counters that money depends on are guarded by CHECK constraints in the
+//   migration, because application guards read stale under concurrency.
+// =====================================================================
+
+// =====================================================================
+// ENUMS -- IDENTITY
+// =====================================================================
 
 enum Role {
+  SUPER_ADMIN
   ADMIN
+  SELLER
   CUSTOMER
 }
 
@@ -22,9 +39,14 @@ enum AuthProvider {
   FACEBOOK
 }
 
-//////////////////////////////////////////////////////
+enum TokenType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+// =====================================================================
 // USER
-//////////////////////////////////////////////////////
+// =====================================================================
 
 model User {
   id     String  @id @default(cuid())
@@ -35,30 +57,42 @@ model User {
 
   role Role @default(CUSTOMER)
 
-  isActive   Boolean @default(true)
-  isVerified Boolean @default(false)
+  isActive Boolean @default(true)
+
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+
+  // Every refresh token issued before this instant is rejected. That is how
+  // "force logout on password change" works without enumerating live sessions.
+  passwordChangedAt DateTime?
+
+  lastLoginAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relations
-  accounts      Account[]
-  refreshTokens RefreshToken[]
+  accounts           Account[]
+  refreshTokens      RefreshToken[]
+  verificationTokens VerificationToken[]
 
-  addresses     Address[]
-  cart          Cart?
-  wishlists     Wishlist[]
-  reviews       Review[]
+  // Present only when role = SELLER.
+  seller Seller?
+
+  addresses         Address[]
+  cart              Cart?
+  wishlists         Wishlist[]
+  reviews           Review[]
   orders            Order[]
   notifications     Notification[]
   couponRedemptions CouponRedemption[]
+  returnRequests    ReturnRequest[]
 
   @@index([role])
 }
 
-//////////////////////////////////////////////////////
-// ACCOUNT
-//////////////////////////////////////////////////////
+// =====================================================================
+// ACCOUNT -- one row per login method
+// =====================================================================
 
 model Account {
   id String @id @default(cuid())
@@ -77,25 +111,26 @@ model Account {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // Fully non-null, so this actually constrains. Without it, Postgres NULLS
-  // DISTINCT lets a user hold unlimited EMAIL accounts (providerAccountId is
-  // NULL for those), each with its own password hash — meaning an old password
+  // DISTINCT lets one user hold unlimited EMAIL accounts (providerAccountId is
+  // NULL for those), each with its own password hash -- meaning an old password
   // could keep authenticating, with the winner decided by the query planner.
   @@unique([userId, provider])
-  // Still correct for OAuth: providerAccountId is non-null there, so this does
-  // stop two users claiming the same Google/Facebook identity. It is only the
-  // NULL (EMAIL) case it cannot constrain, which the unique above now covers.
+  // Correct for OAuth: providerAccountId is non-null there, so this does stop
+  // two users claiming the same Google/Facebook identity.
   @@unique([provider, providerAccountId])
   @@index([userId])
 }
 
-//////////////////////////////////////////////////////
-// REFRESH TOKEN
-//////////////////////////////////////////////////////
+// =====================================================================
+// TOKENS
+// =====================================================================
 
 model RefreshToken {
   id String @id @default(cuid())
 
-  token String @unique
+  // Hash, never the raw token: a database leak would otherwise hand an
+  // attacker every live session directly.
+  tokenHash String @unique
 
   userId String
 
@@ -103,28 +138,104 @@ model RefreshToken {
 
   revoked Boolean @default(false)
 
+  userAgent String?
+  ipAddress String?
+
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
+  @@index([userId, revoked])
   @@index([expiresAt])
 }
 
-//////////////////////////////////////////////////////
-// PRODUCT STATUS
-//////////////////////////////////////////////////////
+model VerificationToken {
+  id String @id @default(cuid())
 
-enum ProductStatus {
-  DRAFT
-  ACTIVE
-  INACTIVE
-  OUT_OF_STOCK
+  // Null for pre-signup flows where no User row exists yet.
+  userId String?
+
+  // The email the token was issued to. Kept separate from the User row so an
+  // email-change flow can verify the NEW address before committing it.
+  identifier String
+
+  tokenHash String @unique
+
+  type TokenType
+
+  expiresAt DateTime
+
+  consumedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([identifier, type])
+  @@index([expiresAt])
 }
 
-//////////////////////////////////////////////////////
-// CATEGORY
-//////////////////////////////////////////////////////
+// =====================================================================
+// SELLER -- supplier portal
+//
+// Sellers are external suppliers with their own admin panel. They manage their
+// own catalogue and see their own sales. The customer-facing storefront never
+// exposes them: every product is presented as Aydin Bazar's own.
+// =====================================================================
+
+enum SellerStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+  REJECTED
+}
+
+model Seller {
+  id String @id @default(cuid())
+
+  // The login account. role must be SELLER.
+  userId String @unique
+
+  shopName String
+
+  // Internal reference only -- never routed to on the storefront.
+  code String @unique
+
+  contactName  String?
+  contactPhone String
+  contactEmail String?
+  address      String?
+
+  // Percent of gross that the platform keeps. Snapshotted onto every
+  // SellerLedger row, so changing it here never rewrites past earnings.
+  commissionRate Decimal @default(0) @db.Decimal(5, 2)
+
+  bankAccountName   String?
+  bankAccountNumber String?
+  bankName          String?
+  bankBranch        String?
+  bkashNumber       String?
+
+  status SellerStatus @default(PENDING)
+
+  approvedAt   DateTime?
+  approvedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  products      Product[]
+  ledgerEntries SellerLedger[]
+  payouts       Payout[]
+
+  @@index([status])
+}
+
+// =====================================================================
+// CATALOG -- CATEGORY & BRAND
+// =====================================================================
 
 model Category {
   id String @id @default(cuid())
@@ -135,10 +246,8 @@ model Category {
 
   description String?
 
-  icon String?
-
-  image String?
-
+  icon   String?
+  image  String?
   banner String?
 
   parentId String?
@@ -147,14 +256,11 @@ model Category {
 
   isActive Boolean @default(true)
 
-  metaTitle String?
-
+  metaTitle       String?
   metaDescription String?
-
-  metaKeywords String?
+  metaKeywords    String?
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   // Restrict, not the Prisma default SetNull: deleting a parent would silently
@@ -165,13 +271,12 @@ model Category {
 
   products Product[]
 
-  @@index([parentId])
-  @@index([sortOrder])
-}
+  couponCategories CouponCategory[]
+  flashSaleRules   FlashSaleRule[]
 
-//////////////////////////////////////////////////////
-// BRAND
-//////////////////////////////////////////////////////
+  @@index([parentId])
+  @@index([isActive, sortOrder])
+}
 
 model Brand {
   id String @id @default(cuid())
@@ -180,32 +285,110 @@ model Brand {
 
   slug String @unique
 
-  logo String?
-
+  logo        String?
   description String?
 
   sortOrder Int @default(0)
 
   isActive Boolean @default(true)
 
-  metaTitle String?
-
+  metaTitle       String?
   metaDescription String?
-
-  metaKeywords String?
+  metaKeywords    String?
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   products Product[]
 
-  @@index([sortOrder])
+  @@index([isActive, sortOrder])
 }
 
-//////////////////////////////////////////////////////
+// =====================================================================
+// VARIANT OPTION LIBRARY -- global, reusable
+//
+// "Color" and "Red" are defined ONCE and reused across every product. Sellers
+// pick from a dropdown rather than typing, so "Red"/"red"/"RED" cannot diverge
+// -- which matters because external suppliers are entering this data. It also
+// makes store-wide faceted filtering ("show all Red items in size L") a plain
+// indexed join instead of an unindexable LIKE over a display string.
+//
+//   Dress   -> Color x Size
+//   Shampoo -> Weight
+//   Shoes   -> Color x Size
+// =====================================================================
+
+enum OptionDisplayType {
+  DROPDOWN
+  SWATCH // colour chips
+  BUTTON // size / weight pills
+}
+
+model Option {
+  id String @id @default(cuid())
+
+  name String @unique // "Color", "Size", "Weight"
+
+  slug String @unique
+
+  displayType OptionDisplayType @default(DROPDOWN)
+
+  sortOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  values         OptionValue[]
+  productOptions ProductOption[]
+
+  @@index([isActive, sortOrder])
+}
+
+model OptionValue {
+  id String @id @default(cuid())
+
+  optionId String
+
+  value String // "Red", "XL", "250gm"
+
+  slug String
+
+  // Swatch rendering for colours.
+  hexColor String?
+
+  // Explicit ordering, so sizes render S, M, L, XL rather than sorting
+  // alphabetically to L, M, S, XL.
+  sortOrder Int @default(0)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  option Option @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  variantOptions ProductVariantOption[]
+  images         ProductImage[]
+
+  @@unique([optionId, value])
+  @@unique([optionId, slug])
+  @@index([optionId, sortOrder])
+}
+
+// =====================================================================
 // PRODUCT
-//////////////////////////////////////////////////////
+// =====================================================================
+
+enum ProductStatus {
+  DRAFT
+  PENDING_APPROVAL
+  ACTIVE
+  INACTIVE
+  REJECTED
+  OUT_OF_STOCK
+}
 
 model Product {
   id String @id @default(cuid())
@@ -214,16 +397,20 @@ model Product {
 
   brandId String?
 
+  // Which supplier owns this listing. Never surfaced on the storefront.
+  sellerId String?
+
   name String
 
   slug String @unique
 
   shortDescription String?
-
-  description String?
+  description      String?
 
   videoUrl String?
 
+  // Free-text spec sheet for display. NOT filterable -- anything you need to
+  // filter on belongs in the option library above.
   specifications Json?
 
   tags String[] @default([])
@@ -232,51 +419,76 @@ model Product {
 
   status ProductStatus @default(DRAFT)
 
+  // Seller submissions are reviewed before going live, because these products
+  // are presented to customers under Aydin Bazar's own brand.
+  approvedAt      DateTime?
+  approvedById    String?
+  rejectionReason String?
+
+  publishedAt DateTime?
+
   viewCount Int @default(0)
 
-  metaTitle String?
+  // ---- Denormalised for listing pages -------------------------------------
+  // Price and stock live on the variant, and rating lives on Review. Computing
+  // any of them per request means aggregating on every listing query, which
+  // makes price-range filters and rating/best-seller sorts unindexable. These
+  // are maintained by application code on the writes that affect them.
+  minPrice    Decimal? @db.Decimal(10, 2)
+  maxPrice    Decimal? @db.Decimal(10, 2)
+  totalStock  Int      @default(0)
+  soldCount   Int      @default(0)
+  avgRating   Float    @default(0)
+  reviewCount Int      @default(0)
 
+  metaTitle       String?
   metaDescription String?
-
-  metaKeywords String?
+  metaKeywords    String?
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   category Category @relation(fields: [categoryId], references: [id])
 
   brand Brand? @relation(fields: [brandId], references: [id])
 
-  images ProductImage[]
+  seller Seller? @relation(fields: [sellerId], references: [id], onDelete: SetNull)
 
-  variants ProductVariant[]
-
-  reviews Review[]
-
-  wishlists Wishlist[]
-
-  orderItems OrderItem[]
+  images         ProductImage[]
+  productOptions ProductOption[]
+  variants       ProductVariant[]
+  reviews        Review[]
+  wishlists      Wishlist[]
+  orderItems     OrderItem[]
+  couponProducts CouponProduct[]
+  flashSaleRules FlashSaleRule[]
 
   @@index([brandId])
+  @@index([sellerId, status])
   @@index([categoryId, status])
   @@index([status, isFeatured, createdAt(sort: Desc)])
-  // NOTE: there is deliberately no index on `name`. Search issues
-  // ILIKE '%term%', and a leading wildcard makes a btree unusable — the old
-  // @@index([name]) looked like search support while providing none. A pg_trgm
-  // index would fix it, but Prisma Postgres denies CREATE EXTENSION (42501),
-  // so text search is currently unindexed. See FEATURE.md → Search.
+  // Listing sorts and the price-range filter.
+  @@index([status, minPrice])
+  @@index([status, avgRating(sort: Desc)])
+  @@index([status, soldCount(sort: Desc)])
+  @@index([status, publishedAt(sort: Desc)])
   @@index([tags], type: Gin)
+  // NOTE: no btree on `name`. Search issues ILIKE '%term%' and a leading
+  // wildcard makes a btree unusable -- the old @@index([name]) looked like
+  // search support while providing none. Prisma Postgres denies CREATE
+  // EXTENSION (42501), so pg_trgm is unavailable; see FEATURE.md -> Search.
 }
-
-//////////////////////////////////////////////////////
-// PRODUCT IMAGE
-//////////////////////////////////////////////////////
 
 model ProductImage {
   id String @id @default(cuid())
 
   productId String
+
+  // When set, this image belongs to one option value -- typically a colour.
+  // Selecting "Red" swaps the gallery to the red photos. Null = shared image.
+  // Tied to the VALUE rather than the variant so a dress does not need the
+  // same red photos duplicated across S, M, L and XL.
+  optionValueId String?
 
   url String
 
@@ -290,18 +502,46 @@ model ProductImage {
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  @@index([productId])
+  optionValue OptionValue? @relation(fields: [optionValueId], references: [id], onDelete: SetNull)
+
+  @@index([productId, sortOrder])
+  @@index([optionValueId])
 }
 
-//////////////////////////////////////////////////////
-// PRODUCT VARIANT
-//////////////////////////////////////////////////////
+// Which options this product uses, and in what order they render.
+model ProductOption {
+  id String @id @default(cuid())
+
+  productId String
+
+  optionId String
+
+  // Colour row above the size row.
+  sortOrder Int @default(0)
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  option Option @relation(fields: [optionId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, optionId])
+  @@index([optionId])
+}
+
+// =====================================================================
+// PRODUCT VARIANT -- the sellable unit
+//
+// Price and stock live here, never on Product. A dress in Red/L and Red/M are
+// two variants with independent stock and price.
+// =====================================================================
 
 model ProductVariant {
   id String @id @default(cuid())
 
   productId String
 
+  // Display label generated from the selected option values ("Red / L").
+  // Denormalised on purpose: invoices and OrderItem snapshots need a stable
+  // human-readable name. The authoritative structure is ProductVariantOption.
   name String
 
   sku String @unique
@@ -310,15 +550,21 @@ model ProductVariant {
 
   price Decimal @db.Decimal(10, 2)
 
+  // Strike-through "was" price.
   comparePrice Decimal? @db.Decimal(10, 2)
 
+  // Purchase cost, for margin reporting. Never exposed to customers.
   costPrice Decimal? @db.Decimal(10, 2)
 
   stock Int @default(0)
 
-  weight Decimal? @db.Decimal(8, 2)
+  // Held during checkout so two customers cannot both buy the last unit.
+  // Available = stock - reservedStock.
+  reservedStock Int @default(0)
 
-  imageUrl String?
+  lowStockThreshold Int @default(5)
+
+  weight Decimal? @db.Decimal(8, 2)
 
   sortOrder Int @default(0)
 
@@ -327,36 +573,41 @@ model ProductVariant {
   isDefault Boolean @default(false)
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  cartItems CartItem[]
-
+  variantOptions ProductVariantOption[]
+  cartItems      CartItem[]
   orderItems     OrderItem[]
   flashSaleItems FlashSaleItem[]
+  flashSaleRules FlashSaleRule[]
 
   @@unique([productId, name])
   @@index([price])
-  @@index([stock])
-  // isDefault is enforced by a partial unique index added in the migration,
-  // which also serves the "default variant for product X" lookup.
   @@index([productId, isActive])
+  // isDefault is enforced by a partial unique index in the migration, which
+  // also serves the "default variant for product X" lookup.
 }
 
-//////////////////////////////////////////////////////
-// DISCOUNT
-//////////////////////////////////////////////////////
+// Join: this variant IS Red + L.
+model ProductVariantOption {
+  variantId String
 
-enum DiscountType {
-  PERCENTAGE
-  FIXED
+  valueId String
+
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  value OptionValue @relation(fields: [valueId], references: [id], onDelete: Restrict)
+
+  @@id([variantId, valueId])
+  // Drives faceted filtering: "every variant that is Red".
+  @@index([valueId])
 }
 
-//////////////////////////////////////////////////////
+// =====================================================================
 // ADDRESS
-//////////////////////////////////////////////////////
+// =====================================================================
 
 model Address {
   id String @id @default(cuid())
@@ -370,12 +621,9 @@ model Address {
   label String?
 
   division String
-
   district String
-
-  upazila String
-
-  area String?
+  upazila  String
+  area     String?
 
   address String
 
@@ -384,7 +632,6 @@ model Address {
   isDefault Boolean @default(false)
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -394,9 +641,9 @@ model Address {
   @@index([userId])
 }
 
-//////////////////////////////////////////////////////
-// CART
-//////////////////////////////////////////////////////
+// =====================================================================
+// CART & WISHLIST -- login required, no guest support by design
+// =====================================================================
 
 model Cart {
   id String @id @default(cuid())
@@ -404,17 +651,12 @@ model Cart {
   userId String @unique
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   items CartItem[]
 }
-
-//////////////////////////////////////////////////////
-// CART ITEM
-//////////////////////////////////////////////////////
 
 model CartItem {
   id String @id @default(cuid())
@@ -426,21 +668,18 @@ model CartItem {
   quantity Int @default(1)
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   cart Cart @relation(fields: [cartId], references: [id], onDelete: Cascade)
 
-  // Carts are disposable — an abandoned cart must not block deleting a product.
+  // Carts are disposable -- an abandoned cart must not block deleting a
+  // product. Price is deliberately NOT snapshotted here: the cart should always
+  // reflect the current price.
   variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
   @@unique([cartId, variantId])
   @@index([variantId])
 }
-
-//////////////////////////////////////////////////////
-// WISHLIST
-//////////////////////////////////////////////////////
 
 model Wishlist {
   id String @id @default(cuid())
@@ -460,9 +699,15 @@ model Wishlist {
   @@index([productId])
 }
 
-//////////////////////////////////////////////////////
-// COUPON
-//////////////////////////////////////////////////////
+// =====================================================================
+// PROMOTIONS -- COUPONS
+// =====================================================================
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+  FREE_SHIPPING
+}
 
 model Coupon {
   id String @id @default(cuid())
@@ -475,44 +720,69 @@ model Coupon {
 
   discountType DiscountType
 
-  discountValue Decimal @db.Decimal(10, 2)
+  // Ignored when discountType = FREE_SHIPPING.
+  discountValue Decimal @default(0) @db.Decimal(10, 2)
 
   minimumOrderAmount Decimal? @db.Decimal(10, 2)
-
-  maximumDiscount Decimal? @db.Decimal(10, 2)
+  maximumDiscount    Decimal? @db.Decimal(10, 2)
 
   totalUsageLimit Int?
+  usedCount       Int  @default(0)
+  perUserLimit    Int  @default(1)
 
-  usedCount Int @default(0)
+  // When neither categories nor products are attached, the coupon applies to
+  // the whole store. Attaching either scopes it to just those.
+  categories CouponCategory[]
+  products   CouponProduct[]
 
-  perUserLimit Int @default(1)
-
-  startsAt DateTime?
-
+  startsAt  DateTime?
   expiresAt DateTime?
 
   isActive Boolean @default(true)
 
-  createdAt DateTime @default(now())
+  applyWithFlashSale Boolean @default(false)
 
+  createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   orders      Order[]
   redemptions CouponRedemption[]
 
-  applyWithFlashSale Boolean @default(false)
-
   @@index([startsAt])
-  @@index([expiresAt])
   @@index([isActive, expiresAt])
 }
 
-// Redemption ledger. Replaces the old UserCoupon.usedCount counter, which was
-// a bare integer with no link to the orders that consumed it — a cancelled
-// order's decrement was a blind guess, and a crash mid-flow left permanent,
-// undetectable drift. Here both Coupon.usedCount and the per-user count are
-// derivable, and replay is race-safe by unique violation rather than
-// read-then-write.
+model CouponCategory {
+  couponId String
+
+  categoryId String
+
+  coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([couponId, categoryId])
+  @@index([categoryId])
+}
+
+model CouponProduct {
+  couponId String
+
+  productId String
+
+  coupon Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([couponId, productId])
+  @@index([productId])
+}
+
+// Redemption ledger. Replaces a bare usedCount counter, which had no link to
+// the orders that consumed it -- a cancelled order's decrement was a blind
+// guess, and a crash mid-flow left permanent, undetectable drift. Here both the
+// global and per-user counts are derivable, and replay is race-safe by unique
+// violation rather than read-then-write.
 model CouponRedemption {
   id String @id @default(cuid())
 
@@ -521,6 +791,8 @@ model CouponRedemption {
   userId String
 
   orderId String
+
+  discountAmount Decimal @default(0) @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
 
@@ -538,9 +810,23 @@ model CouponRedemption {
   @@index([orderId])
 }
 
-//////////////////////////////////////////////////////
-// FLASH SALE
-//////////////////////////////////////////////////////
+// =====================================================================
+// PROMOTIONS -- FLASH SALES
+//
+// Rule-based. An admin picks a category, a product or a single variant and
+// gives a discount; the rule resolves at read time, so products added to that
+// category later join the sale automatically. Absolute per-variant pricing is
+// impractical when a rule covers hundreds of products.
+//
+// Resolution priority when several rules match one variant:
+//     VARIANT  >  PRODUCT  >  CATEGORY
+// =====================================================================
+
+enum FlashSaleScope {
+  CATEGORY
+  PRODUCT
+  VARIANT
+}
 
 model FlashSale {
   id String @id @default(cuid())
@@ -552,25 +838,57 @@ model FlashSale {
   banner String?
 
   startsAt DateTime
-
-  endsAt DateTime
+  endsAt   DateTime
 
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
+  rules FlashSaleRule[]
   items FlashSaleItem[]
 
-  // Serves "sales live right now" — the only query that matters here.
+  // Serves "sales live right now" -- the only query that matters here.
   @@index([isActive, startsAt, endsAt])
 }
 
-//////////////////////////////////////////////////////
-// FLASH SALE ITEM
-//////////////////////////////////////////////////////
+model FlashSaleRule {
+  id String @id @default(cuid())
 
+  flashSaleId String
+
+  scope FlashSaleScope
+
+  // Exactly one of these is set, matching `scope`. A CHECK constraint in the
+  // migration enforces that.
+  categoryId String?
+  productId  String?
+  variantId  String?
+
+  discountType DiscountType
+
+  discountValue Decimal @db.Decimal(10, 2)
+
+  // Caps a percentage discount in absolute terms.
+  maxDiscount Decimal? @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  flashSale FlashSale @relation(fields: [flashSaleId], references: [id], onDelete: Cascade)
+
+  category Category?       @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  product  Product?        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant  ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([flashSaleId])
+  @@index([categoryId])
+  @@index([productId])
+  @@index([variantId])
+}
+
+// Per-variant participation cap and sold counter. Rules decide the PRICE;
+// this decides HOW MANY may sell at that price and tracks how many have.
 model FlashSaleItem {
   id String @id @default(cuid())
 
@@ -578,27 +896,26 @@ model FlashSaleItem {
 
   variantId String
 
-  salePrice Decimal @db.Decimal(10, 2)
-
   quantityLimit Int?
 
   soldCount Int @default(0)
 
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
   flashSale FlashSale @relation(fields: [flashSaleId], references: [id], onDelete: Cascade)
 
-  // Reach the product via variant.product. A separate productId was derivable
-  // from the variant and nothing kept the two in agreement, so the storefront
-  // badge query and the cart pricing path could disagree.
+  // Reach the product via variant.product -- a separate productId would be
+  // derivable and nothing would keep the two in agreement.
   variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
   @@unique([flashSaleId, variantId])
-  @@index([flashSaleId])
   @@index([variantId])
 }
 
-//////////////////////////////////////////////////////
-// PAYMENT
-//////////////////////////////////////////////////////
+// =====================================================================
+// ORDERS
+// =====================================================================
 
 enum PaymentMethod {
   COD
@@ -611,6 +928,7 @@ enum PaymentStatus {
   PAID
   FAILED
   REFUNDED
+  PARTIALLY_REFUNDED
 }
 
 enum OrderStatus {
@@ -623,47 +941,34 @@ enum OrderStatus {
   RETURNED
 }
 
-//////////////////////////////////////////////////////
-// ORDER
-//////////////////////////////////////////////////////
-
 model Order {
   id String @id @default(cuid())
 
+  // Contact snapshot -- kept even if the user later edits their profile.
   email String
-
   phone String
 
   userId String
 
-  // Provenance only. The ship* fields below are the authoritative destination —
+  // Provenance only. The ship* fields below are the authoritative destination:
   // Address is user-editable, so a live FK would rewrite historical orders.
   addressId String?
 
   shipReceiverName String
-
-  shipPhone String
-
-  shipDivision String
-
-  shipDistrict String
-
-  shipUpazila String
-
-  shipArea String?
-
-  shipAddress String
-
-  shipPostalCode String?
+  shipPhone        String
+  shipDivision     String
+  shipDistrict     String
+  shipUpazila      String
+  shipArea         String?
+  shipAddress      String
+  shipPostalCode   String?
 
   couponId String?
 
   // Snapshotted so a deleted coupon cannot erase the provenance of `discount`.
-  couponCode String?
-
-  couponDiscountType DiscountType?
-
-  couponDiscountValue Decimal? @db.Decimal(10, 2)
+  couponCode          String?
+  couponDiscountType  DiscountType?
+  couponDiscountValue Decimal?      @db.Decimal(10, 2)
 
   invoiceNo String @unique
 
@@ -671,22 +976,33 @@ model Order {
 
   discount Decimal @default(0) @db.Decimal(10, 2)
 
+  // Rate snapshotted alongside the amount, so a past invoice stays decomposable
+  // after the configured VAT rate changes.
+  taxRate Decimal @default(0) @db.Decimal(5, 2)
+  tax     Decimal @default(0) @db.Decimal(10, 2)
+
   shippingCharge Decimal @default(0) @db.Decimal(10, 2)
 
   total Decimal @db.Decimal(10, 2)
 
   paymentMethod PaymentMethod
 
+  // Derived caches of the Payment / Shipment ledgers. Update them only in the
+  // same transaction as the underlying write.
   paymentStatus PaymentStatus @default(PENDING)
-
-  orderStatus OrderStatus @default(PENDING)
-
-  trackingNumber String?
+  orderStatus   OrderStatus   @default(PENDING)
 
   note String?
 
-  createdAt DateTime @default(now())
+  cancelReason String?
+  cancelledById String?
 
+  confirmedAt DateTime?
+  shippedAt   DateTime?
+  deliveredAt DateTime?
+  cancelledAt DateTime?
+
+  createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id])
@@ -699,44 +1015,47 @@ model Order {
 
   couponRedemptions CouponRedemption[]
 
-  // One row per attempt: a failed bKash try, the retry, then a refund all
-  // coexist instead of overwriting each other. Order.paymentStatus is a
-  // derived cache of the resolved state.
+  // One row per attempt: a failed bKash try, the retry, and a refund all
+  // coexist instead of overwriting each other.
   payments Payment[]
+
+  statusHistory  OrderStatusHistory[]
+  shipments      Shipment[]
+  returnRequests ReturnRequest[]
+  refunds        Refund[]
+  sellerLedger   SellerLedger[]
 
   @@index([addressId])
   @@index([couponId])
   @@index([userId, createdAt(sort: Desc)])
   @@index([orderStatus, createdAt(sort: Desc)])
+  @@index([paymentStatus, createdAt(sort: Desc)])
 }
-
-//////////////////////////////////////////////////////
-// ORDER ITEM
-//////////////////////////////////////////////////////
 
 model OrderItem {
   id String @id @default(cuid())
 
   orderId String
 
-  // Nullable so a discontinued variant can be deleted. Order history survives
-  // on the title/sku/unitPrice/image snapshots below; productId keeps the item
-  // traceable to a product once variantId is gone.
+  // Nullable so a discontinued variant or product can still be deleted. Order
+  // history survives on the snapshots below.
   variantId String?
-
   productId String?
+
+  // Snapshot, NOT derived through product: settlement must survive a product
+  // being deleted, otherwise seller attribution is lost from history.
+  sellerId String?
 
   quantity Int
 
-  title String
-
-  sku String
-
-  unitPrice Decimal @db.Decimal(10, 2)
-
-  totalPrice Decimal @db.Decimal(10, 2)
-
-  image String?
+  // Snapshots taken at purchase time. Renaming a product or changing its price
+  // must never rewrite a past invoice.
+  title       String
+  variantName String?
+  sku         String
+  unitPrice   Decimal @db.Decimal(10, 2)
+  totalPrice  Decimal @db.Decimal(10, 2)
+  image       String?
 
   createdAt DateTime @default(now())
 
@@ -746,14 +1065,42 @@ model OrderItem {
 
   product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
+  review      Review?
+  returnItems ReturnItem[]
+  ledgerEntry SellerLedger?
+
   @@index([orderId])
   @@index([variantId])
   @@index([productId])
+  @@index([sellerId])
 }
 
-//////////////////////////////////////////////////////
-// PAYMENT
-//////////////////////////////////////////////////////
+model OrderStatusHistory {
+  id String @id @default(cuid())
+
+  orderId String
+
+  fromStatus OrderStatus?
+
+  toStatus OrderStatus
+
+  note String?
+
+  changedById String?
+
+  // Internal notes stay out of the customer-facing timeline.
+  isPublic Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+}
+
+// =====================================================================
+// PAYMENTS
+// =====================================================================
 
 model Payment {
   id String @id @default(cuid())
@@ -767,7 +1114,7 @@ model Payment {
   status PaymentStatus
 
   // Idempotency key: bKash and SSLCommerz both retry IPN callbacks on non-2xx,
-  // so replayed webhooks must collide rather than insert a duplicate.
+  // so a replayed webhook must collide rather than insert a duplicate.
   transactionId String? @unique
 
   gatewayResponse Json?
@@ -775,18 +1122,354 @@ model Payment {
   paidAt DateTime?
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  refunds Refund[]
 
   @@index([orderId])
   @@index([status, createdAt])
 }
 
-//////////////////////////////////////////////////////
-// REVIEW
-//////////////////////////////////////////////////////
+enum RefundMethod {
+  ORIGINAL
+  BKASH
+  BANK_TRANSFER
+  CASH
+}
+
+enum RefundStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// Separate from Payment on purpose. Flipping Payment.status to REFUNDED would
+// overwrite the successful capture and destroy proof of what was taken.
+model Refund {
+  id String @id @default(cuid())
+
+  orderId String
+
+  paymentId String?
+
+  returnRequestId String?
+
+  amount Decimal @db.Decimal(10, 2)
+
+  method RefundMethod
+
+  status RefundStatus @default(PENDING)
+
+  transactionId String? @unique
+
+  gatewayResponse Json?
+
+  reason String?
+
+  processedById String?
+  processedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  returnRequest ReturnRequest? @relation(fields: [returnRequestId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([paymentId])
+  @@index([returnRequestId])
+  @@index([status, createdAt])
+}
+
+// =====================================================================
+// RETURNS
+// =====================================================================
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  RECEIVED
+  REFUNDED
+  CANCELLED
+}
+
+enum ReturnReason {
+  DAMAGED
+  WRONG_ITEM
+  NOT_AS_DESCRIBED
+  SIZE_ISSUE
+  QUALITY_ISSUE
+  CHANGED_MIND
+  OTHER
+}
+
+model ReturnRequest {
+  id String @id @default(cuid())
+
+  orderId String
+
+  userId String?
+
+  reference String @unique
+
+  reason ReturnReason
+
+  note String?
+
+  images String[] @default([])
+
+  status ReturnStatus @default(REQUESTED)
+
+  refundAmount Decimal? @db.Decimal(10, 2)
+
+  rejectionReason String?
+
+  processedById String?
+  processedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  items   ReturnItem[]
+  refunds Refund[]
+
+  @@index([orderId])
+  @@index([userId])
+  @@index([status, createdAt])
+}
+
+// Partial returns: 2 of the 5 items in an order can come back.
+model ReturnItem {
+  id String @id @default(cuid())
+
+  returnRequestId String
+
+  orderItemId String
+
+  quantity Int
+
+  reason ReturnReason?
+
+  // Whether the returned unit went back into sellable stock.
+  restocked Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  returnRequest ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@unique([returnRequestId, orderItemId])
+  @@index([orderItemId])
+}
+
+// =====================================================================
+// SHIPPING -- courier integration
+// =====================================================================
+
+enum Courier {
+  PATHAO
+  STEADFAST
+  REDX
+  PAPERFLY
+  SUNDARBAN
+  MANUAL
+}
+
+enum ShipmentStatus {
+  PENDING
+  BOOKED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  RETURNED
+  CANCELLED
+  FAILED
+}
+
+model Shipment {
+  id String @id @default(cuid())
+
+  orderId String
+
+  courier Courier
+
+  // The courier's own tracking id.
+  consignmentId String?
+
+  // What we sent them as our reference, for reconciliation.
+  merchantOrderId String?
+
+  status ShipmentStatus @default(PENDING)
+
+  deliveryFee Decimal? @db.Decimal(10, 2)
+
+  // Amount the rider collects for a COD order.
+  codAmount Decimal? @db.Decimal(10, 2)
+
+  labelUrl    String?
+  trackingUrl String?
+
+  gatewayResponse Json?
+
+  bookedAt    DateTime?
+  deliveredAt DateTime?
+
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  statusLogs ShipmentStatusLog[]
+
+  // Idempotency for courier webhooks: a replayed callback collides instead of
+  // creating a second shipment.
+  @@unique([courier, consignmentId])
+  @@index([orderId])
+  @@index([status, createdAt])
+}
+
+model ShipmentStatusLog {
+  id String @id @default(cuid())
+
+  shipmentId String
+
+  status ShipmentStatus
+
+  // The courier's own status string, before mapping onto our enum.
+  rawStatus String?
+
+  note String?
+
+  payload Json?
+
+  createdAt DateTime @default(now())
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@index([shipmentId, createdAt])
+}
+
+// =====================================================================
+// SELLER SETTLEMENT
+// =====================================================================
+
+enum LedgerStatus {
+  PENDING // order placed, not yet delivered
+  PAYABLE // delivered and past the return window
+  PAID // included in a completed payout
+  CANCELLED // order cancelled or returned
+}
+
+// One row per sold line. Commission is snapshotted, so changing a seller's rate
+// never rewrites what they already earned.
+model SellerLedger {
+  id String @id @default(cuid())
+
+  sellerId String
+
+  orderId String
+
+  orderItemId String @unique
+
+  grossAmount Decimal @db.Decimal(10, 2)
+
+  commissionRate Decimal @db.Decimal(5, 2)
+
+  commissionAmount Decimal @db.Decimal(10, 2)
+
+  netPayable Decimal @db.Decimal(10, 2)
+
+  status LedgerStatus @default(PENDING)
+
+  payoutId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  seller Seller @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  payout Payout? @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+
+  @@index([sellerId, status])
+  @@index([orderId])
+  @@index([payoutId])
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum PayoutMethod {
+  BANK_TRANSFER
+  BKASH
+  CASH
+}
+
+model Payout {
+  id String @id @default(cuid())
+
+  sellerId String
+
+  reference String @unique
+
+  amount Decimal @db.Decimal(10, 2)
+
+  method PayoutMethod
+
+  status PayoutStatus @default(PENDING)
+
+  periodFrom DateTime
+  periodTo   DateTime
+
+  transactionRef String?
+
+  note String?
+
+  processedById String?
+  processedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  seller Seller @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+
+  ledgerEntries SellerLedger[]
+
+  @@index([sellerId, status])
+  @@index([status, createdAt])
+}
+
+// =====================================================================
+// REVIEWS
+// =====================================================================
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
 
 model Review {
   id String @id @default(cuid())
@@ -795,40 +1478,56 @@ model Review {
 
   productId String
 
+  // The purchased line this review is for. Makes the review a verified
+  // purchase, and lets a customer who buys the same product again leave a
+  // second review -- which a unique on (userId, productId) would have blocked.
+  orderItemId String? @unique
+
   rating Int
 
   comment String?
 
   images String[] @default([])
 
-  createdAt DateTime @default(now())
+  // Reviews carry user-uploaded images, so they are held for moderation rather
+  // than published straight onto product pages.
+  status ReviewStatus @default(PENDING)
 
+  isVerifiedPurchase Boolean @default(false)
+
+  adminReply   String?
+  adminReplyAt DateTime?
+
+  helpfulCount Int @default(0)
+
+  createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id])
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, productId])
-  @@index([productId])
+  orderItem OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+
+  @@index([productId, status, createdAt(sort: Desc)])
   @@index([userId])
+  @@index([status, createdAt])
 }
 
-//////////////////////////////////////////////////////
-// NOTIFICATION
-//////////////////////////////////////////////////////
+// =====================================================================
+// NOTIFICATIONS
+// =====================================================================
 
 enum NotificationType {
   SYSTEM
   ORDER
   PAYMENT
   PROMOTION
+  SELLER
 }
 
 model Notification {
   id String @id @default(cuid())
-
-  link String?
 
   userId String
 
@@ -837,6 +1536,8 @@ model Notification {
   message String
 
   type NotificationType
+
+  link String?
 
   isRead Boolean @default(false)
 
@@ -847,9 +1548,9 @@ model Notification {
   @@index([userId, isRead, createdAt(sort: Desc)])
 }
 
-//////////////////////////////////////////////////////
-// BANNER
-//////////////////////////////////////////////////////
+// =====================================================================
+// CONTENT
+// =====================================================================
 
 model Banner {
   id String @id @default(cuid())
@@ -857,11 +1558,9 @@ model Banner {
   title String
 
   desktopImageUrl String
-
-  mobileImageUrl String?
+  mobileImageUrl  String?
 
   buttonText String?
-
   buttonLink String?
 
   sortOrder Int @default(0)
@@ -869,59 +1568,76 @@ model Banner {
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 
   @@index([isActive, sortOrder])
 }
 
-//////////////////////////////////////////////////////
+// Terms, Privacy Policy, Refund Policy, About, FAQ.
+// bKash and SSLCommerz merchant onboarding both require live policy pages on
+// the storefront domain, so this blocks gateway approval rather than code.
+model Page {
+  id String @id @default(cuid())
+
+  slug String @unique
+
+  title String
+
+  content String
+
+  isPublished Boolean @default(true)
+
+  metaTitle       String?
+  metaDescription String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isPublished])
+}
+
+// =====================================================================
 // SETTINGS
-//////////////////////////////////////////////////////
+// =====================================================================
 
 model Setting {
-  // Singleton. A CHECK constraint in the migration pins this to one row —
+  // Singleton. A CHECK constraint in the migration pins this to one row --
   // otherwise findFirst() has no ORDER BY and identical carts could resolve
   // different shipping charges depending on which row the planner returns.
   id String @id @default("singleton")
 
   storeName String?
-
-  logo String?
-
-  favicon String?
+  logo      String?
+  favicon   String?
 
   supportEmail String?
-
   supportPhone String?
 
-  facebook String?
-
+  facebook  String?
   instagram String?
+  youtube   String?
+  tiktok    String?
+  whatsapp  String?
 
-  youtube String?
-
-  tiktok String?
-
-  whatsapp String?
-
-  currency String?
-
+  currency       String?
   currencySymbol String?
 
-  insideDhakaShippingCharge Decimal? @db.Decimal(10, 2)
+  vatEnabled Boolean  @default(false)
+  vatRate    Decimal? @db.Decimal(5, 2)
 
+  insideDhakaShippingCharge  Decimal? @db.Decimal(10, 2)
   outsideDhakaShippingCharge Decimal? @db.Decimal(10, 2)
+  freeShippingMinimumAmount  Decimal? @db.Decimal(10, 2)
 
-  freeShippingMinimumAmount Decimal? @db.Decimal(10, 2)
+  // Return window, in days after delivery, during which a customer may open a
+  // ReturnRequest and before which seller ledger rows stay PENDING.
+  returnWindowDays Int @default(7)
 
-  facebookPixelId String?
-
+  facebookPixelId   String?
   googleAnalyticsId String?
 
   maintenanceMode Boolean @default(false)
 
   createdAt DateTime @default(now())
-
   updatedAt DateTime @updatedAt
 }

@@ -1,4 +1,6 @@
+import nodemailer, { Transporter } from "nodemailer";
 import { env, isProduction } from "../config/env";
+import ApiError from "../utils/ApiError";
 
 export interface MailMessage {
   to: string;
@@ -34,14 +36,6 @@ class ConsoleMailer implements Mailer {
   }
 }
 
-/**
- * Swap this for a real transport when you pick a provider. Nothing outside this
- * file needs to change -- the auth service only knows about the Mailer
- * interface.
- *
- *   Nodemailer:  npm i nodemailer   -> implement send() with a transporter
- *   Resend:      npm i resend       -> implement send() with resend.emails.send
- */
 class UnconfiguredMailer implements Mailer {
   async send(message: MailMessage): Promise<void> {
     // Loud rather than silent: an email that never arrives in production is
@@ -52,9 +46,63 @@ class UnconfiguredMailer implements Mailer {
   }
 }
 
-export const mailer: Mailer = isProduction
-  ? new UnconfiguredMailer()
-  : new ConsoleMailer();
+/**
+ * Real transport over SMTP (Brevo, or any provider -- only .env changes).
+ * EMAIL_FROM must be a sender address verified with the provider, or the
+ * relay will reject the message.
+ */
+class SmtpMailer implements Mailer {
+  private transporter: Transporter;
+
+  constructor() {
+    this.transporter = nodemailer.createTransport({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      secure: env.SMTP_PORT === 465, // 587/25 upgrade via STARTTLS instead
+      auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+      // Fail fast: the defaults wait up to 2 minutes on an unreachable relay,
+      // holding the HTTP request open the whole time. 15s turns a bad network
+      // moment into a quick 502 the client can retry.
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+    });
+
+    // Surface bad credentials at boot, not at the first signup. Non-fatal:
+    // a transient network failure here should not take the API down.
+    this.transporter.verify().then(
+      () => console.log(`[mailer] SMTP transport ready (${env.SMTP_HOST})`),
+      (err) => console.error("[mailer] SMTP verification failed:", err),
+    );
+  }
+
+  async send(message: MailMessage): Promise<void> {
+    try {
+      await this.transporter.sendMail({
+        from: env.EMAIL_FROM,
+        to: message.to,
+        subject: message.subject,
+        text: message.text,
+        html: message.html,
+      });
+    } catch (err) {
+      // The real cause goes to the server log; the client gets a clean 502.
+      // The token row is already committed, so /resend-verification or a
+      // retried /forgot-password recovers the flow.
+      console.error(`[mailer] send failed for "${message.subject}":`, err);
+      throw new ApiError(502, "Failed to send email. Please try again later.");
+    }
+  }
+}
+
+const smtpConfigured = Boolean(
+  env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS && env.EMAIL_FROM,
+);
+
+export const mailer: Mailer = smtpConfigured
+  ? new SmtpMailer()
+  : isProduction
+    ? new UnconfiguredMailer()
+    : new ConsoleMailer();
 
 // ---------------------------------------------------------------------------
 // Templates

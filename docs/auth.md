@@ -36,9 +36,11 @@ curl http://localhost:5000/api/v1/health
 # {"success":true,"message":"API is running 🚀"}
 ```
 
-> **No email is actually sent.** In development the mailer prints the message to
-> the terminal running `npm run dev`. That is where you copy the verification
-> and password-reset links from. See [the signup flow](#the-signup-flow).
+> **Email delivery depends on `.env`.** With `SMTP_HOST`, `SMTP_USER`,
+> `SMTP_PASS` and `EMAIL_FROM` set (Brevo — see `.env.example`), real emails
+> are sent. Without them, in development the mailer prints the message to the
+> terminal running `npm run dev` — that is where you copy the verification and
+> password-reset links from. See [the signup flow](#the-signup-flow).
 
 ---
 
@@ -95,7 +97,9 @@ POST /login   ← now works
 
 ### Getting the token in development
 
-After `POST /register`, look at the terminal running `npm run dev`:
+With SMTP configured, the email arrives in the real inbox — copy the token
+from the link there. Without it, after `POST /register` look at the terminal
+running `npm run dev`:
 
 ```
 ========================================================================
@@ -585,11 +589,14 @@ Then set the collection's Authorization to **Bearer Token** with value
 target email; `/login` and `/reset-password` allow 10 per 15 minutes. Limits are
 **disabled outside production**, so local testing is not throttled.
 
-**No real email transport yet.** `src/lib/mailer.ts` prints to the console in
-development and logs a loud error in production rather than failing silently.
-Implement `send()` with your provider — nothing else in the auth code changes.
-This now blocks more than signup: seller invites and email changes depend on it
-too.
+**Real email goes through SMTP (Brevo).** `src/lib/mailer.ts` sends via
+nodemailer whenever `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` and `EMAIL_FROM` are
+all set; otherwise it prints to the console in development and logs a loud
+error in production rather than failing silently. A failed send returns `502`
+**after** the token row is committed, so `/resend-verification` (or retrying
+`/forgot-password`) recovers the flow. Set all four vars before deploying —
+seller invites and email changes depend on delivery too, and `EMAIL_FROM` must
+be a sender verified in Brevo.
 
 Also worth knowing:
 

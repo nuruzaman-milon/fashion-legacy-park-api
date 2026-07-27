@@ -120,6 +120,23 @@ export const buildVerificationEmail = (
   };
 };
 
+/**
+ * Distinct from buildVerificationEmail on purpose: an EMAIL_CHANGE token must
+ * be consumed by /verify-new-email, not /verify-email, so the link needs its
+ * own client path — a shared /verify-email page cannot tell the two apart.
+ */
+export const buildEmailChangeEmail = (
+  name: string,
+  token: string,
+): Omit<MailMessage, "to"> => {
+  const link = `${env.CLIENT_URL}/confirm-email-change?token=${token}`;
+  return {
+    subject: "Confirm your new email address",
+    text: `Hi ${name},\n\nConfirm this address to make it the login email for your account:\n\n${link}\n\nThis link expires in ${env.EMAIL_VERIFICATION_TTL_MINUTES} minutes.\n\nIf you did not request this change, you can ignore this email -- your login email will not change.`,
+    html: `<p>Hi ${name},</p><p>Confirm this address to make it the login email for your account:</p><p><a href="${link}">${link}</a></p><p>This link expires in ${env.EMAIL_VERIFICATION_TTL_MINUTES} minutes.</p><p>If you did not request this change, you can ignore this email &mdash; your login email will not change.</p>`,
+  };
+};
+
 export const buildPasswordResetEmail = (
   name: string,
   token: string,

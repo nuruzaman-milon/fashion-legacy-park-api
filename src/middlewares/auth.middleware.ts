@@ -47,7 +47,11 @@ export const authenticate = catchAsync(
     }
 
     if (!user.isActive) {
-      throw new ApiError(403, "This account has been deactivated");
+      throw new ApiError(
+        403,
+        "This account has been deactivated",
+        "ACCOUNT_DEACTIVATED",
+      );
     }
 
     // Force logout on password change. Refresh tokens are revoked at the same
@@ -114,7 +118,11 @@ export const requireVerified = catchAsync(
     });
 
     if (!user?.emailVerifiedAt) {
-      throw new ApiError(403, "Please verify your email address first");
+      throw new ApiError(
+        403,
+        "Please verify your email address first",
+        "EMAIL_NOT_VERIFIED",
+      );
     }
 
     next();

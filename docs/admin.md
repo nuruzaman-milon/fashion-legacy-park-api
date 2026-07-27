@@ -1,7 +1,8 @@
 # Admin, Seller & Account API
 
-Companion to [`auth.md`](./auth.md), which covers login, registration and
-password flows. This document covers everything built on top of them.
+Companion to [`auth.md`](./auth.md), which covers the complete customer auth
+surface — registration, login, password flows, profile, email change, sessions
+and avatar. This document covers everything built on top of that.
 
 Base URL: `http://localhost:5000/api/v1`
 
@@ -224,88 +225,11 @@ and the bank/bKash payout fields.
 
 ## Account self-service
 
-All under `/auth`, all requiring `authenticate`.
-
-### `PATCH /auth/me`
-
-```json
-{ "name": "Updated Name", "phone": "01911111111" }
-```
-
-Both optional, at least one required. `email`, `role` and `isActive` are **not**
-accepted here — sending `email` returns `400`.
-
-### `POST /auth/change-email`
-
-```json
-{ "newEmail": "new@example.com", "password": "Str0ng!Pass1" }
-```
-
-Sends a verification link **to the new address**. The current password is
-required, so a hijacked session cannot quietly move the account away.
-
-> **`User.email` does not change yet.** The pending address lives on the token
-> until it is confirmed. Committing first and verifying afterwards would mean a
-> typo moves the account to an address nobody controls — unrecoverable, since
-> both login and password reset key on email.
-
-Errors: `401` wrong password · `409` address already in use · `400` same as
-current.
-
-### `POST /auth/verify-new-email`
-
-```json
-{ "token": "..." }
-```
-
-Commits the change. Public, because the link is opened from the new inbox, which
-may not be the browser holding the session.
-
-Uniqueness is re-checked here, not just at request time — someone else may have
-registered the address in between.
-
-### `GET /auth/sessions`
-
-```json
-{
-  "success": true,
-  "message": "Sessions fetched",
-  "data": [
-    {
-      "id": "cmrt...",
-      "userAgent": "Mozilla/5.0 ...",
-      "ipAddress": "203.0.113.9",
-      "createdAt": "2026-07-20T12:02:44.101Z",
-      "expiresAt": "2026-08-19T12:02:44.101Z",
-      "isCurrent": true
-    }
-  ]
-}
-```
-
-`isCurrent` is computed by hashing your refresh cookie and comparing. The stored
-hash itself is never returned.
-
-### `DELETE /auth/sessions/:id`
-
-Revokes one device. Scoped to your own sessions — someone else's id returns
-`404`.
-
-### `POST /auth/me/avatar` (multipart, field name `avatar`)
-
-Max 2 MB, `image/*` only. Replacing an avatar deletes the previous file from
-Cloudinary.
-
-Returns `503` unless `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` and
-`CLOUDINARY_API_SECRET` are all set. The rest of the app runs fine without them.
-
-```bash
-curl -X POST "$API/auth/me/avatar" \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "avatar=@./photo.jpg"
-```
-
-### `DELETE /auth/me/avatar`
+Moved to [`auth.md`](./auth.md#endpoint-reference). Profile updates
+(`PATCH /auth/me`), email change (`POST /auth/change-email` →
+`POST /auth/verify-new-email`), session management (`GET /auth/sessions`,
+`DELETE /auth/sessions/:id`) and avatar upload (`POST`/`DELETE /auth/me/avatar`)
+are documented there, alongside the rest of the auth module.
 
 ---
 

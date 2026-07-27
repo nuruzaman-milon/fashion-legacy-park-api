@@ -12,10 +12,17 @@ const REFRESH_COOKIE = "refreshToken";
 // httpOnly keeps the refresh token out of reach of JavaScript, so an XSS bug
 // cannot exfiltrate it. The path scoping means it is only ever sent to the
 // endpoints that actually need it, not attached to every API call.
+//
+// SameSite=Lax assumes the browser reaches this API same-site: directly on
+// localhost in development, and through the frontend's /api/v1/* rewrite proxy
+// (or an api.<same-domain> subdomain) in production. Lax also CSRF-protects
+// the cookie. Only a deployment where the API sits on an unrelated domain
+// would need "none" — and third-party cookie blocking breaks that setup in
+// Safari anyway, so it is deliberately not supported.
 const refreshCookieOptions = (): CookieOptions => ({
   httpOnly: true,
   secure: isProduction,
-  sameSite: isProduction ? "none" : "lax",
+  sameSite: "lax",
   maxAge: env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
   path: "/api/v1/auth",
 });

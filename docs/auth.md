@@ -2,9 +2,9 @@
 
 Base URL: `http://localhost:5000/api/v1/auth`
 
-> Login, registration and password flows are covered here. Profile updates,
-> email change, session management, avatar upload, addresses, and the admin and
-> seller surfaces live in [`admin.md`](./admin.md).
+> The complete customer auth surface is covered here: registration, login and
+> password flows, plus profile, email change, sessions and avatar. Addresses
+> and the admin and seller surfaces live in [`admin.md`](./admin.md).
 
 ---
 
@@ -77,6 +77,11 @@ someone steals one, it stops working the moment either party uses it.
 3. On a `401`, call `POST /refresh` once, then retry the original request.
 4. If `/refresh` also returns `401`, the session is genuinely over — send the
    user to login.
+5. Run **only one `/refresh` at a time**. Refresh tokens rotate and are
+   single-use, so two concurrent refreshes (e.g. two tabs hitting a `401`
+   together) leave the loser with a dead cookie and a false "session over"
+   logout. Share one in-flight refresh promise per tab, and serialize across
+   tabs — `navigator.locks.request("refresh", ...)` is the simplest way.
 
 ---
 
@@ -122,6 +127,23 @@ Take the value after `token=` and send it to `POST /verify-email`.
 > If the user never receives the email, `POST /resend-verification` issues a new
 > link. Without it they would be permanently locked out — which is why that
 > endpoint exists even though it is not in the "happy path".
+
+### Email links the frontend must handle
+
+Three emails carry a token link into the client. Each token is **single-use** —
+a second submit returns `400` — and each must be POSTed to its own endpoint:
+
+| Email | Link path | POST the token to | Lifetime (default) |
+|---|---|---|---|
+| Signup verification | `/verify-email?token=...` | `/verify-email` | 24 hours |
+| Password reset | `/reset-password?token=...` | `/reset-password` | 60 minutes |
+| Email change | `/confirm-email-change?token=...` | `/verify-new-email` | 24 hours |
+
+Lifetimes come from `EMAIL_VERIFICATION_TTL_MINUTES` and
+`PASSWORD_RESET_TTL_MINUTES`. Because tokens are single-use, have the landing
+page submit on a **button click** rather than automatically on mount — that
+survives React StrictMode double-effects, and stops link-scanning email
+security software from consuming the token before the user opens the page.
 
 ---
 
@@ -230,8 +252,14 @@ Issues a new verification link and invalidates the previous one.
 **`200 OK`** — sets the refresh cookie and returns the access token.
 
 ```
-Set-Cookie: refreshToken=...; HttpOnly; Path=/api/v1/auth; Max-Age=2592000
+Set-Cookie: refreshToken=...; HttpOnly; Path=/api/v1/auth; Max-Age=2592000; SameSite=Lax
 ```
+
+> `Secure` is added in production. `SameSite=Lax` assumes the browser reaches
+> this API same-site — directly on localhost in development, and through the
+> frontend's `/api/v1/*` rewrite proxy (or an `api.<same-domain>` subdomain) in
+> production. Auth calls from the browser must send `credentials: 'include'`
+> when the API is on a different origin (e.g. `localhost:3000` → `:5000`).
 
 ```json
 {
@@ -255,12 +283,15 @@ Set-Cookie: refreshToken=...; HttpOnly; Path=/api/v1/auth; Max-Age=2592000
 
 **Errors**
 
-| Code | When | Message |
+| Status | `code` | When |
 |---|---|---|
-| `401` | Wrong password **or** unknown email | `Invalid email or password` |
-| `403` | Email not verified | `Please verify your email address before logging in...` |
-| `403` | Account deactivated | `This account has been deactivated` |
-| `400` | Validation | `Validation Error` |
+| `401` | — | Wrong password **or** unknown email |
+| `403` | `EMAIL_NOT_VERIFIED` | Email not verified — offer the resend flow |
+| `403` | `ACCOUNT_DEACTIVATED` | Account deactivated — direct to support |
+| `400` | — | Validation |
+
+The two `403`s need different UX, so each carries a machine-readable `code`
+field in the error body — branch on that, never on `message`.
 
 > A wrong password and an unknown email produce the **identical** `401`, and take
 > the same amount of time. Neither the message nor the response latency reveals
@@ -277,11 +308,11 @@ request body.**
 
 **Errors**
 
-| Code | When |
+| Status | When |
 |---|---|
 | `401` | No cookie sent (`No active session`) |
 | `401` | Token revoked, expired, or already rotated |
-| `403` | Account deactivated |
+| `403` | Account deactivated (`code: "ACCOUNT_DEACTIVATED"`) |
 
 > Presenting an **already-rotated** token returns `401`. This is intentional —
 > each refresh token works exactly once.
@@ -408,6 +439,141 @@ Revokes **every** refresh token for the user — logs out all devices.
 ```
 
 **Errors** — `401` missing/invalid/expired token · `403` deactivated
+(`code: "ACCOUNT_DEACTIVATED"`)
+
+---
+
+### 🔒 `PATCH /me`
+
+Update `name` and/or `phone`. Both optional, at least one required.
+
+**Request**
+
+```json
+{ "name": "Updated Name", "phone": "01911111111" }
+```
+
+**`200 OK`** — same `data` shape as `GET /me`.
+
+`email`, `role` and `isActive` are **not** accepted here — sending `email`
+returns `400`. Email changes go through the two-step flow below.
+
+**Errors** — `401` not authenticated · `400` validation
+
+---
+
+### 🔒 `POST /change-email`
+
+Starts an email change by sending a confirmation link **to the new address**.
+
+**Request**
+
+```json
+{ "newEmail": "new@example.com", "password": "Str0ng!Pass1" }
+```
+
+**`200 OK`**
+
+```json
+{
+  "success": true,
+  "message": "Verification link sent to the new address. Your email changes once you confirm it."
+}
+```
+
+The link points to `{CLIENT_URL}/confirm-email-change?token=...` — a
+**different client path** from signup verification, because this token must be
+consumed by `POST /verify-new-email`, not `/verify-email`.
+
+> **`User.email` does not change yet.** The pending address lives on the token
+> until it is confirmed — a typo cannot move the account to an address nobody
+> controls. The current password is required so a hijacked session cannot
+> quietly move the account away.
+
+**Errors** — `401` wrong password · `409` address already in use · `400` same
+as current, no password set (social-only account), or validation
+
+---
+
+### 🔓 `POST /verify-new-email`
+
+Consumes the token from the confirmation email and commits the change.
+
+**Request**
+
+```json
+{ "token": "..." }
+```
+
+**`200 OK`** — updated user, with the new email and `isEmailVerified: true`.
+
+Public, because the link is opened from the **new** inbox, which may not be the
+browser holding the session. Uniqueness is re-checked at consumption time —
+someone may have registered the address in between.
+
+**Errors** — `400` invalid/expired/used token · `409` address taken since the
+request
+
+---
+
+### 🔒🍪 `GET /sessions`
+
+Lists the account's active sessions (one per refresh token).
+
+**`200 OK`**
+
+```json
+{
+  "success": true,
+  "message": "Sessions fetched",
+  "data": [
+    {
+      "id": "cmrt...",
+      "userAgent": "Mozilla/5.0 ...",
+      "ipAddress": "203.0.113.9",
+      "createdAt": "2026-07-20T12:02:44.101Z",
+      "expiresAt": "2026-08-19T12:02:44.101Z",
+      "isCurrent": true
+    }
+  ]
+}
+```
+
+`isCurrent` is computed by hashing the refresh cookie you sent and comparing —
+the stored hash itself is never returned.
+
+---
+
+### 🔒 `DELETE /sessions/:id`
+
+Revokes one device's session. Scoped to your own — someone else's id returns
+`404`, so ids cannot be probed for existence.
+
+**Errors** — `404` not found, already revoked, or not yours
+
+---
+
+### 🔒 `POST /me/avatar`
+
+Multipart upload, field name `avatar`. Max 2 MB, `image/*` only. Replacing an
+avatar deletes the previous file from Cloudinary.
+
+```bash
+curl -X POST $API/me/avatar -H "Authorization: Bearer $ACCESS" \
+  -F "avatar=@./photo.jpg"
+```
+
+**`200 OK`** — updated user with the new `avatar` URL.
+
+**Errors** — `400` no file or wrong type · `503` Cloudinary env vars not set
+
+---
+
+### 🔒 `DELETE /me/avatar`
+
+Removes the avatar.
+
+**`200 OK`** — updated user with `avatar: null`.
 
 ---
 
@@ -426,9 +592,12 @@ Every response uses one of two shapes.
 **Error**
 
 ```json
-{ "success": false, "message": "...", "errors": [ ], "stack": "..." }
+{ "success": false, "message": "...", "code": "...", "errors": [ ], "stack": "..." }
 ```
 
+- `code` appears only on errors the client must branch on. Current values:
+  `EMAIL_NOT_VERIFIED`, `ACCOUNT_DEACTIVATED`. Branch on `code`, never on
+  `message` — messages are for humans and may be reworded.
 - `errors` appears only for validation failures.
 - `stack` appears only when `NODE_ENV !== "production"`.
 
@@ -465,10 +634,12 @@ All failing fields are returned at once, not one at a time.
 |---|---|---|
 | `400` | Validation failed, or a bad/expired email token | Show field errors, or ask for a new link |
 | `401` | Not authenticated, or credentials rejected | Try `/refresh` once; if that fails, log in again |
-| `403` | Authenticated but not allowed | Email unverified → offer resend. Deactivated → contact support |
+| `403` | Authenticated but not allowed | Branch on `code`: `EMAIL_NOT_VERIFIED` → offer resend · `ACCOUNT_DEACTIVATED` → contact support |
 | `404` | Route or record not found | — |
-| `409` | Conflict — email already registered | Suggest logging in instead |
+| `409` | Conflict — email already registered / address already in use | Suggest logging in, or a different address |
+| `429` | Rate limited (production only) | Back off and retry later |
 | `500` | Server error | Real cause is logged server-side, never returned |
+| `503` | Avatar upload attempted without Cloudinary configured | — |
 
 ---
 

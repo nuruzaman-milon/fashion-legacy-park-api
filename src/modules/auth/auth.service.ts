@@ -14,6 +14,7 @@ import {
   minutesFromNow,
 } from "../../utils/token";
 import {
+  buildEmailChangeEmail,
   buildPasswordResetEmail,
   buildVerificationEmail,
   mailer,
@@ -273,8 +274,14 @@ export const login = async (
     throw new ApiError(401, "Invalid email or password");
   }
 
+  // Both are 403s, but the client UX differs (resend link vs contact support),
+  // so each carries a machine-readable code the frontend can branch on.
   if (!user.isActive) {
-    throw new ApiError(403, "This account has been deactivated");
+    throw new ApiError(
+      403,
+      "This account has been deactivated",
+      "ACCOUNT_DEACTIVATED",
+    );
   }
 
   // Policy: verification is required before login. The message has to be
@@ -283,6 +290,7 @@ export const login = async (
     throw new ApiError(
       403,
       "Please verify your email address before logging in. Request a new link if you did not receive it.",
+      "EMAIL_NOT_VERIFIED",
     );
   }
 
@@ -321,7 +329,11 @@ export const refresh = async (
   const { user } = stored;
 
   if (!user.isActive) {
-    throw new ApiError(403, "This account has been deactivated");
+    throw new ApiError(
+      403,
+      "This account has been deactivated",
+      "ACCOUNT_DEACTIVATED",
+    );
   }
 
   // Belt and braces: changing a password revokes every token, but a token
@@ -595,7 +607,7 @@ export const requestEmailChange = async (
 
   await mailer.send({
     to: input.newEmail,
-    ...buildVerificationEmail(account.user.name, token),
+    ...buildEmailChangeEmail(account.user.name, token),
   });
 };
 

@@ -8,6 +8,7 @@ import { isProduction } from "../config/env";
 interface ErrorBody {
   success: false;
   message: string;
+  code?: string;
   errors?: unknown;
   stack?: string;
 }
@@ -28,11 +29,13 @@ const globalErrorHandler = (
 ): void => {
   let statusCode = 500;
   let message = "Internal Server Error";
+  let code: string | undefined;
   let errors: unknown;
 
   if (err instanceof ApiError) {
     statusCode = err.statusCode;
     message = err.message;
+    code = err.code;
   } else if (err instanceof ZodError) {
     statusCode = 400;
     message = "Validation Error";
@@ -77,6 +80,10 @@ const globalErrorHandler = (
   }
 
   const body: ErrorBody = { success: false, message };
+
+  if (code !== undefined) {
+    body.code = code;
+  }
 
   if (errors !== undefined) {
     body.errors = errors;

@@ -17,6 +17,16 @@ export const tree = catchAsync(async (_req: Request, res: Response) => {
   });
 });
 
+export const menu = catchAsync(async (_req: Request, res: Response) => {
+  const data = await service.getMenu();
+
+  sendResponse(res, 200, {
+    success: true,
+    message: "Navigation menu fetched",
+    data,
+  });
+});
+
 export const getBySlug = catchAsync(async (req: Request, res: Response) => {
   const category = await service.getBySlug(pathParam(req, "slug"));
 
@@ -88,3 +98,27 @@ export const reorder = catchAsync(async (req: Request, res: Response) => {
     message: "Categories reordered",
   });
 });
+
+export const getMenuProducts = catchAsync(
+  async (req: Request, res: Response) => {
+    const data = await service.getMenuProducts(pathParam(req, "id"));
+
+    sendResponse(res, 200, {
+      success: true,
+      message: "Menu products fetched",
+      data,
+    });
+  },
+);
+
+export const setMenuProducts = catchAsync(
+  async (req: Request, res: Response) => {
+    const data = await service.setMenuProducts(pathParam(req, "id"), req.body);
+
+    sendResponse(res, 200, {
+      success: true,
+      message: "Menu products updated",
+      data,
+    });
+  },
+);

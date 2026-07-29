@@ -13,8 +13,13 @@ import {
   CreateCategoryInput,
   ListCategoriesQuery,
   ReorderInput,
+  SetMenuProductsInput,
   UpdateCategoryInput,
 } from "./category.validation";
+// Shared with the storefront product listing on purpose: "what may the
+// customer see" must have exactly one definition, or a suspended seller's
+// product could vanish from /products yet linger in the megamenu.
+import { visibleWhere } from "../product/browse.service";
 
 /**
  * Deepest allowed nesting: Clothing > Women > Saree.
@@ -102,6 +107,8 @@ export interface CategoryNode {
   icon: string | null;
   image: string | null;
   sortOrder: number;
+  /** Visible products in this category and its whole subtree. */
+  productCount: number;
   children: CategoryNode[];
 }
 
@@ -113,23 +120,40 @@ export interface CategoryNode {
  * beats N round-trips per level.
  */
 export const getTree = async (): Promise<CategoryNode[]> => {
-  const rows = await prisma.category.findMany({
-    where: { isActive: true },
-    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      icon: true,
-      image: true,
-      sortOrder: true,
-      parentId: true,
-    },
-  });
+  const [rows, counts] = await Promise.all([
+    prisma.category.findMany({
+      where: { isActive: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        icon: true,
+        image: true,
+        sortOrder: true,
+        parentId: true,
+      },
+    }),
+    // Storefront-visible products only, so a category card never advertises a
+    // count the listing page behind it cannot show.
+    prisma.product.groupBy({
+      by: ["categoryId"],
+      where: visibleWhere,
+      _count: { _all: true },
+    }),
+  ]);
+
+  const directCount = new Map(
+    counts.map((c) => [c.categoryId, c._count._all]),
+  );
 
   const byId = new Map<string, CategoryNode>();
   for (const row of rows) {
-    byId.set(row.id, { ...row, children: [] });
+    byId.set(row.id, {
+      ...row,
+      productCount: directCount.get(row.id) ?? 0,
+      children: [],
+    });
   }
 
   const roots: CategoryNode[] = [];
@@ -145,6 +169,19 @@ export const getTree = async (): Promise<CategoryNode[]> => {
     }
   }
 
+  // Products hang off leaves, but "Women" advertises everything under it --
+  // roll each node's count up through its ancestors.
+  const rollUp = (node: CategoryNode): number => {
+    for (const child of node.children) {
+      node.productCount += rollUp(child);
+    }
+    return node.productCount;
+  };
+
+  for (const root of roots) {
+    rollUp(root);
+  }
+
   return roots;
 };
 
@@ -158,6 +195,66 @@ export const getBySlug = async (slug: string): Promise<Category> => {
   }
 
   return category;
+};
+
+const menuCard = {
+  id: true,
+  name: true,
+  slug: true,
+  minPrice: true,
+  maxPrice: true,
+  avgRating: true,
+  images: {
+    where: { isPrimary: true },
+    take: 1,
+    select: { url: true, alt: true },
+  },
+} satisfies Prisma.ProductSelect;
+
+export type MenuProductCard = Prisma.ProductGetPayload<{
+  select: typeof menuCard;
+}>;
+
+export interface MenuCategory extends CategoryNode {
+  recommendedProducts: MenuProductCard[];
+}
+
+/**
+ * The whole navbar in one round trip: the active category tree, plus each
+ * top-level category's admin-curated panel products in their curated order.
+ *
+ * Pins pass through the storefront visibility rules at read time, so a pinned
+ * product that is deactivated, rejected, or whose seller is suspended silently
+ * drops out of the menu instead of rendering a card that 404s on click.
+ */
+export const getMenu = async (): Promise<MenuCategory[]> => {
+  const roots = await getTree();
+
+  if (roots.length === 0) return [];
+
+  const pins = await prisma.categoryMenuProduct.findMany({
+    where: {
+      categoryId: { in: roots.map((root) => root.id) },
+      product: visibleWhere,
+    },
+    orderBy: { sortOrder: "asc" },
+    select: {
+      categoryId: true,
+      product: { select: menuCard },
+    },
+  });
+
+  const byCategory = new Map<string, MenuProductCard[]>();
+  for (const pin of pins) {
+    const list = byCategory.get(pin.categoryId) ?? [];
+    list.push(pin.product);
+    byCategory.set(pin.categoryId, list);
+  }
+
+  return roots.map((root) => ({
+    ...root,
+    recommendedProducts: byCategory.get(root.id) ?? [],
+  }));
 };
 
 // ---------------------------------------------------------------------------
@@ -308,4 +405,80 @@ export const reorderCategories = async (input: ReorderInput): Promise<void> => {
       }),
     ),
   );
+};
+
+// ---------------------------------------------------------------------------
+// Admin -- megamenu panel curation
+// ---------------------------------------------------------------------------
+
+// Unlike the storefront read, the admin list does NOT filter by visibility:
+// with status in the payload the panel can flag a pin that went inactive,
+// instead of the product just vanishing with no explanation.
+const adminMenuCard = {
+  id: true,
+  name: true,
+  slug: true,
+  status: true,
+  minPrice: true,
+  images: {
+    where: { isPrimary: true },
+    take: 1,
+    select: { url: true, alt: true },
+  },
+} satisfies Prisma.ProductSelect;
+
+export const getMenuProducts = async (categoryId: string) => {
+  await getById(categoryId);
+
+  return prisma.categoryMenuProduct.findMany({
+    where: { categoryId },
+    orderBy: { sortOrder: "asc" },
+    select: {
+      productId: true,
+      sortOrder: true,
+      product: { select: adminMenuCard },
+    },
+  });
+};
+
+export const setMenuProducts = async (
+  categoryId: string,
+  input: SetMenuProductsInput,
+) => {
+  await getById(categoryId);
+
+  const { productIds } = input;
+
+  if (productIds.length > 0) {
+    const visible = await prisma.product.findMany({
+      where: { id: { in: productIds }, ...visibleWhere },
+      select: { id: true },
+    });
+
+    // Reject rather than silently drop: the admin picked these in a UI moments
+    // ago, so a mismatch means a stale picker or a race with product
+    // moderation -- either way they should be told, not second-guessed.
+    if (visible.length !== productIds.length) {
+      const ok = new Set(visible.map((p) => p.id));
+      const missing = productIds.filter((id) => !ok.has(id));
+
+      throw new ApiError(
+        400,
+        `Not found or not visible on the storefront: ${missing.join(", ")}`,
+      );
+    }
+  }
+
+  await prisma.$transaction([
+    prisma.categoryMenuProduct.deleteMany({ where: { categoryId } }),
+    prisma.categoryMenuProduct.createMany({
+      data: productIds.map((productId, index) => ({
+        categoryId,
+        productId,
+        sortOrder: index,
+      })),
+    }),
+  ]);
+
+  return getMenuProducts(categoryId);
 };

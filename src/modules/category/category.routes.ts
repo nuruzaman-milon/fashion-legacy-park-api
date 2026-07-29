@@ -9,6 +9,7 @@ import {
   createCategorySchema,
   listCategoriesSchema,
   reorderCategoriesSchema,
+  setMenuProductsSchema,
   updateCategorySchema,
 } from "./category.validation";
 
@@ -18,6 +19,10 @@ import {
 export const publicCategoryRoutes = Router();
 
 publicCategoryRoutes.get("/tree", controller.tree);
+
+// Tree + curated panel products in one response; the navbar's only call.
+// Static paths stay above /:slug or they get captured as slugs.
+publicCategoryRoutes.get("/menu", controller.menu);
 
 publicCategoryRoutes.get(
   "/:slug",
@@ -68,4 +73,18 @@ adminCategoryRoutes.delete(
   "/:id",
   validateRequest(categoryIdSchema),
   controller.remove,
+);
+
+// ---- megamenu panel curation ("Our Recommendation") ----
+
+adminCategoryRoutes.get(
+  "/:id/menu-products",
+  validateRequest(categoryIdSchema),
+  controller.getMenuProducts,
+);
+
+adminCategoryRoutes.put(
+  "/:id/menu-products",
+  validateRequest(setMenuProductsSchema),
+  controller.setMenuProducts,
 );

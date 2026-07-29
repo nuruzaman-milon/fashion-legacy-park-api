@@ -287,9 +287,35 @@ model Category {
 
   couponCategories CouponCategory[]
   flashSaleRules   FlashSaleRule[]
+  menuProducts     CategoryMenuProduct[]
 
   @@index([parentId])
   @@index([isActive, sortOrder])
+}
+
+// Admin-curated picks shown in a category's megamenu panel ("Our
+// Recommendation"). Deliberately NOT restricted to the category's subtree: the
+// admin may promote e.g. a skincare set inside the Women menu. Ordering is the
+// row's sortOrder; the storefront read additionally filters to visible
+// products, so a pinned product that goes inactive simply disappears from the
+// menu instead of erroring.
+model CategoryMenuProduct {
+  id String @id @default(cuid())
+
+  categoryId String
+  productId  String
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  // Cascade on both sides: pins are decoration, they must never block deleting
+  // a category or a product the way Restrict FKs elsewhere do.
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([categoryId, productId])
+  @@index([categoryId, sortOrder])
 }
 
 model Brand {
@@ -478,6 +504,7 @@ model Product {
   orderItems     OrderItem[]
   couponProducts CouponProduct[]
   flashSaleRules FlashSaleRule[]
+  menuEntries    CategoryMenuProduct[]
 
   @@index([brandId])
   @@index([sellerId, status])
@@ -1580,10 +1607,25 @@ model Notification {
 model Banner {
   id String @id @default(cuid())
 
+  // Small kicker line rendered above the headline ("Winter Collection · 2026").
+  eyebrow String?
+
   title String
+
+  subtitle String?
 
   desktopImageUrl String
   mobileImageUrl  String?
+  imageAlt        String?
+
+  // Cloudinary public_ids, so replacing an image deletes the old file. Same
+  // reasoning as Category.imagePublicId.
+  desktopImagePublicId String?
+  mobileImagePublicId  String?
+
+  // [{ src, alt?, publicId? }] -- the hero's decorative side images. Json
+  // rather than a child table because they are never queried individually.
+  supportingImages Json?
 
   buttonText String?
   buttonLink String?

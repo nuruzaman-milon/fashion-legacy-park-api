@@ -93,7 +93,26 @@ export const reorderCategoriesSchema = z.object({
   }),
 });
 
+// Full replace, not add/remove endpoints: the admin picker submits its final
+// ordered list in one request, and sortOrder is simply the array index. An
+// empty array clears the panel.
+export const setMenuProductsSchema = z.object({
+  params: idParam,
+  body: z.object({
+    productIds: z
+      .array(z.string().min(1))
+      .max(8, "At most 8 products can be shown in a menu panel")
+      .refine(
+        (ids) => new Set(ids).size === ids.length,
+        "Duplicate product ids",
+      ),
+  }),
+});
+
 export type CreateCategoryInput = z.infer<typeof createCategorySchema>["body"];
 export type UpdateCategoryInput = z.infer<typeof updateCategorySchema>["body"];
 export type ListCategoriesQuery = z.infer<typeof listCategoriesSchema>["query"];
 export type ReorderInput = z.infer<typeof reorderCategoriesSchema>["body"];
+export type SetMenuProductsInput = z.infer<
+  typeof setMenuProductsSchema
+>["body"];

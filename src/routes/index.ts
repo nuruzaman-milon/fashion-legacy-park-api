@@ -6,6 +6,11 @@ import { adminUserRoutes } from "../modules/user";
 import { adminSellerRoutes, sellerRoutes } from "../modules/seller";
 import { publicCategoryRoutes, adminCategoryRoutes } from "../modules/category";
 import { publicBrandRoutes, adminBrandRoutes } from "../modules/brand";
+import { publicBannerRoutes, adminBannerRoutes } from "../modules/banner";
+import {
+  publicFlashSaleRoutes,
+  adminFlashSaleRoutes,
+} from "../modules/flash-sale";
 import {
   publicOptionRoutes,
   adminOptionRoutes,
@@ -36,6 +41,8 @@ router.use("/auth", authRoutes);
 router.use("/addresses", addressRoutes);
 router.use("/categories", publicCategoryRoutes);
 router.use("/brands", publicBrandRoutes);
+router.use("/banners", publicBannerRoutes);
+router.use("/flash-sales", publicFlashSaleRoutes);
 router.use("/options", publicOptionRoutes);
 router.use("/products", publicProductRoutes);
 router.use("/cart", cartRoutes);
@@ -51,6 +58,8 @@ router.use("/admin/users", adminUserRoutes);
 router.use("/admin/sellers", adminSellerRoutes);
 router.use("/admin/categories", adminCategoryRoutes);
 router.use("/admin/brands", adminBrandRoutes);
+router.use("/admin/banners", adminBannerRoutes);
+router.use("/admin/flash-sales", adminFlashSaleRoutes);
 router.use("/admin/options", adminOptionRoutes);
 router.use("/admin/option-values", adminOptionValueRoutes);
 router.use("/admin/products", adminProductRoutes);

@@ -15,7 +15,7 @@ import { BrowseQuery } from "./product.validation";
  * pull their catalogue immediately, and doing it here means every storefront
  * query inherits that without each caller remembering.
  */
-const visibleWhere: Prisma.ProductWhereInput = {
+export const visibleWhere: Prisma.ProductWhereInput = {
   status: { in: [ProductStatus.ACTIVE, ProductStatus.OUT_OF_STOCK] },
   OR: [
     { sellerId: null }, // first-party listing
@@ -44,6 +44,14 @@ const listCard = {
     take: 1,
     select: { url: true, alt: true },
   },
+  // The default variant's comparePrice drives the strikethrough price on
+  // cards. A partial unique index guarantees at most one default per product;
+  // flattened to a top-level `comparePrice` in browse() below.
+  variants: {
+    where: { isDefault: true },
+    take: 1,
+    select: { comparePrice: true },
+  },
 } satisfies Prisma.ProductSelect;
 
 const orderFor = (sort: BrowseQuery["sort"]): Prisma.ProductOrderByWithRelationInput[] => {
@@ -63,13 +71,75 @@ const orderFor = (sort: BrowseQuery["sort"]): Prisma.ProductOrderByWithRelationI
   }
 };
 
+/**
+ * Products hang off leaf categories, but nav links point at ancestors --
+ * nothing is ever assigned directly to "Women". A category filter therefore
+ * matches the whole subtree, not just direct assignment, or every megamenu
+ * link would land on an empty page.
+ *
+ * One small query and an in-memory walk, same reasoning as the category tree
+ * endpoint. The visited set guards against a corrupted parent cycle turning
+ * the walk into a hang.
+ */
+const subtreeIds = async (
+  where: Prisma.CategoryWhereUniqueInput,
+): Promise<string[]> => {
+  const root = await prisma.category.findUnique({
+    where,
+    select: { id: true },
+  });
+
+  // Unknown category -> empty IN-list -> zero products, which is what the old
+  // exact-match filter returned too.
+  if (!root) return [];
+
+  const rows = await prisma.category.findMany({
+    select: { id: true, parentId: true },
+  });
+
+  const childrenOf = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!row.parentId) continue;
+    const siblings = childrenOf.get(row.parentId) ?? [];
+    siblings.push(row.id);
+    childrenOf.set(row.parentId, siblings);
+  }
+
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const queue = [root.id];
+
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    queue.push(...(childrenOf.get(id) ?? []));
+  }
+
+  return ids;
+};
+
 export const browse = async (
   query: BrowseQuery,
 ): Promise<Paginated<unknown>> => {
+  // Both filters may arrive together; they AND like the old exact matches did.
+  let categoryIds: string[] | undefined;
+
+  if (query.categoryId) {
+    categoryIds = await subtreeIds({ id: query.categoryId });
+  }
+
+  if (query.categorySlug) {
+    const bySlug = await subtreeIds({ slug: query.categorySlug });
+    categoryIds = categoryIds
+      ? categoryIds.filter((id) => bySlug.includes(id))
+      : bySlug;
+  }
+
   const where: Prisma.ProductWhereInput = {
     ...visibleWhere,
-    ...(query.categoryId && { categoryId: query.categoryId }),
-    ...(query.categorySlug && { category: { slug: query.categorySlug } }),
+    ...(categoryIds && { categoryId: { in: categoryIds } }),
     ...(query.brandId && { brandId: query.brandId }),
     ...(query.brandSlug && { brand: { slug: query.brandSlug } }),
     ...(query.tag && { tags: { has: query.tag } }),
@@ -112,7 +182,12 @@ export const browse = async (
     prisma.product.count({ where }),
   ]);
 
-  return paginate(items, total, query);
+  const cards = items.map(({ variants, ...item }) => ({
+    ...item,
+    comparePrice: variants[0]?.comparePrice ?? null,
+  }));
+
+  return paginate(cards, total, query);
 };
 
 /**

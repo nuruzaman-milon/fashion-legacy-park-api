@@ -41,6 +41,10 @@ const envSchema = z.object({
   // Used to build the links inside verification and reset emails.
   CLIENT_URL: z.url().default("http://localhost:3000"),
 
+  // Comma-separated CORS allowlist (dev servers + the deployed storefront).
+  // Optional: a single-origin setup falls back to CLIENT_URL alone.
+  CORS_ORIGINS: z.string().optional(),
+
   // Optional: avatar upload returns 503 unless all three are set, rather than
   // blocking startup. Everything else in the app works without them.
   CLOUDINARY_CLOUD_NAME: z.string().optional(),
@@ -71,3 +75,10 @@ if (!parsed.success) {
 export const env = parsed.data;
 
 export const isProduction = env.NODE_ENV === "production";
+
+// Trailing slashes stripped because the browser's Origin header never has one
+// -- "https://site.app/" in .env would otherwise silently never match.
+export const corsOrigins = (env.CORS_ORIGINS ?? env.CLIENT_URL)
+  .split(",")
+  .map((origin) => origin.trim().replace(/\/$/, ""))
+  .filter(Boolean);

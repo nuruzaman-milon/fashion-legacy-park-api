@@ -9,7 +9,7 @@ import globalErrorHandler, {
   notFoundHandler,
 } from "./middlewares/error.middleware";
 import { globalLimiter } from "./middlewares/rateLimit.middleware";
-import { env } from "./config/env";
+import { corsOrigins } from "./config/env";
 
 const app = express();
 
@@ -18,10 +18,11 @@ const app = express();
 app.set("trust proxy", 1);
 
 // credentials:true is required for the refresh-token cookie to survive a
-// cross-origin request. With it, the origin cannot be "*".
+// cross-origin request. With it, the origin cannot be "*" -- hence an explicit
+// allowlist (local dev servers + the deployed storefront).
 app.use(
   cors({
-    origin: env.CLIENT_URL,
+    origin: corsOrigins,
     credentials: true,
   }),
 );

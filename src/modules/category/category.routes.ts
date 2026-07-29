@@ -24,6 +24,9 @@ publicCategoryRoutes.get("/tree", controller.tree);
 // Static paths stay above /:slug or they get captured as slugs.
 publicCategoryRoutes.get("/menu", controller.menu);
 
+// Admin-curated homepage "Shop by category" tiles.
+publicCategoryRoutes.get("/featured", controller.featured);
+
 publicCategoryRoutes.get(
   "/:slug",
   validateRequest(categorySlugSchema),

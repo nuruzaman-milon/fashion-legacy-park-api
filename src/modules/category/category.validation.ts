@@ -36,6 +36,8 @@ export const createCategorySchema = z.object({
     parentId: z.string().min(1).nullable().optional(),
     sortOrder: z.coerce.number().int().min(0).default(0),
     isActive: z.boolean().default(true),
+    showOnHome: z.boolean().default(false),
+    homeSortOrder: z.coerce.number().int().min(0).default(0),
     ...imageFields,
     ...seoFields,
   }),
@@ -56,6 +58,8 @@ export const updateCategorySchema = z.object({
       parentId: z.string().min(1).nullable().optional(),
       sortOrder: z.coerce.number().int().min(0).optional(),
       isActive: z.boolean().optional(),
+      showOnHome: z.boolean().optional(),
+      homeSortOrder: z.coerce.number().int().min(0).optional(),
       ...imageFields,
       ...seoFields,
     })

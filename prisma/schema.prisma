@@ -270,6 +270,12 @@ model Category {
 
   isActive Boolean @default(true)
 
+  // Homepage "Shop by category" curation: admins flag the categories worth
+  // spotlighting (usually leaves — the roots already live in the navbar) and
+  // order them independently of the nav's sortOrder.
+  showOnHome    Boolean @default(false)
+  homeSortOrder Int     @default(0)
+
   metaTitle       String?
   metaDescription String?
   metaKeywords    String?

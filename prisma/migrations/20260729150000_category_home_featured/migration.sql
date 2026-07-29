@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Category" ADD COLUMN "showOnHome" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "homeSortOrder" INTEGER NOT NULL DEFAULT 0;

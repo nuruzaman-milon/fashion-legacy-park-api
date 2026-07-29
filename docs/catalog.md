@@ -61,6 +61,16 @@ Nested tree of **active** categories, for the storefront nav.
 > Deactivating a category hides its **whole branch**. Setting "Women" inactive
 > removes "Saree" from the tree too, rather than promoting it to the top level.
 
+### `GET /categories/featured` — public
+
+Admin-curated categories for the homepage "Shop by category" section, in
+curated order. Curation lives on the category itself — `showOnHome` +
+`homeSortOrder`, set via `PATCH /admin/categories/:id` — and the endpoint
+returns each tile with `rootName` (top-level ancestor, for labels like
+"Women · Dresses") and the subtree `productCount`. A category under a
+deactivated parent drops out, same rule as the tree. Seed:
+`prisma/seed-featured.js`.
+
 ### `GET /categories/:slug` — public
 
 Single active category. `404` if missing or inactive.

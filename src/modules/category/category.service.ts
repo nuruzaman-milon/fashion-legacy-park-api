@@ -185,6 +185,67 @@ export const getTree = async (): Promise<CategoryNode[]> => {
   return roots;
 };
 
+export interface FeaturedCategory {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string | null;
+  image: string | null;
+  /**
+   * Top-level ancestor ("Women", "Men", …), null when the category is itself
+   * a root. The immediate parent would be ambiguous — both Women and Men have
+   * a "Clothing" — so tiles are labelled with the root instead.
+   */
+  rootName: string | null;
+  /** Visible products in this category and its whole subtree. */
+  productCount: number;
+  homeSortOrder: number;
+}
+
+/**
+ * Admin-curated categories for the homepage "Shop by category" section, in
+ * curated order. Built on getTree rather than a direct query so the subtree
+ * productCount and the "inactive ancestor hides the branch" rule have exactly
+ * one definition — a category under a deactivated parent drops out here too.
+ */
+export const getFeatured = async (): Promise<FeaturedCategory[]> => {
+  const [roots, flagged] = await Promise.all([
+    getTree(),
+    prisma.category.findMany({
+      where: { isActive: true, showOnHome: true },
+      orderBy: [{ homeSortOrder: "asc" }, { name: "asc" }],
+      select: { id: true, homeSortOrder: true },
+    }),
+  ]);
+
+  const byId = new Map<string, { node: CategoryNode; rootName: string | null }>();
+  const index = (nodes: CategoryNode[], rootName: string | null): void => {
+    for (const node of nodes) {
+      byId.set(node.id, { node, rootName });
+      index(node.children, rootName ?? node.name);
+    }
+  };
+  index(roots, null);
+
+  return flagged.flatMap((row) => {
+    const entry = byId.get(row.id);
+    if (!entry) return [];
+    const { node, rootName } = entry;
+    return [
+      {
+        id: node.id,
+        name: node.name,
+        slug: node.slug,
+        icon: node.icon,
+        image: node.image,
+        rootName,
+        productCount: node.productCount,
+        homeSortOrder: row.homeSortOrder,
+      },
+    ];
+  });
+};
+
 export const getBySlug = async (slug: string): Promise<Category> => {
   const category = await prisma.category.findFirst({
     where: { slug, isActive: true },

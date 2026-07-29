@@ -27,6 +27,16 @@ export const menu = catchAsync(async (_req: Request, res: Response) => {
   });
 });
 
+export const featured = catchAsync(async (_req: Request, res: Response) => {
+  const data = await service.getFeatured();
+
+  sendResponse(res, 200, {
+    success: true,
+    message: "Featured categories fetched",
+    data,
+  });
+});
+
 export const getBySlug = catchAsync(async (req: Request, res: Response) => {
   const category = await service.getBySlug(pathParam(req, "slug"));
 

@@ -9,6 +9,9 @@ const supportingImage = z.object({
   src: z.url(),
   alt: z.string().trim().max(255).optional(),
   publicId: z.string().optional(),
+  // Where the hero tile navigates on click. Plain string like buttonLink —
+  // internal paths ("/products/red-gown") are the common case.
+  href: z.string().trim().max(500).optional(),
 });
 
 const bannerFields = {

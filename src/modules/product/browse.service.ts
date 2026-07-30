@@ -295,8 +295,24 @@ export const getBySlug = async (slug: string) => {
       .flatMap((v) => v.variantOptions.map((vo) => vo.valueId)),
   );
 
+  // The option relation carries the option's whole value library ("Size" owns
+  // S…XL and 150ml/250ml alike). The picker must only offer what THIS
+  // product's variants are actually built from — an unused value is noise,
+  // not an out-of-stock state.
+  const usedValueIds = new Set(
+    product.variants.flatMap((v) => v.variantOptions.map((vo) => vo.valueId)),
+  );
+  const productOptions = product.productOptions.map((po) => ({
+    ...po,
+    option: {
+      ...po.option,
+      values: po.option.values.filter((value) => usedValueIds.has(value.id)),
+    },
+  }));
+
   return {
     ...product,
+    productOptions,
     variants,
     inStockValueIds: [...inStockValueIds],
   };

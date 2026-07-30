@@ -4,7 +4,9 @@
  * - Recreates the 12 products from the frontend's mock data
  *   (fashion-legacy-frontend/src/lib/api/mock/home-data.ts) with the SAME
  *   slugs, prices and image paths, so the frontend's local images render.
- * - Adds filler products across every category leaf (picsum.photos images).
+ * - Adds filler products across every category leaf, with hand-picked
+ *   Unsplash photos matching each product (FILLER_IMG). Re-running also
+ *   upgrades any old picsum placeholder images left on existing products.
  * - Wires a "Size" option + variants for the three multi-price mock products,
  *   so the product detail page's variant picker is testable.
  * - Pins 3-4 products per root category (megamenu "Our Recommendation").
@@ -26,6 +28,53 @@ const prisma = new PrismaClient();
 
 const localImg = (slug) => `/images/products/${slug}.jpg`;
 const picsum = (slug) => `https://picsum.photos/seed/${slug}/600/800`;
+
+// Hand-picked Unsplash photos that actually depict each filler product
+// (picsum returned random landscapes, which looked wrong on the storefront).
+// Each URL was visually verified against the product name before being added.
+const FILLER_IMG = {
+  "pastel-chiffon-top": "https://images.unsplash.com/photo-1608234807905-4466023792f5?auto=format&fit=crop&w=600&h=800&q=80",
+  "embroidered-cotton-top": "https://images.unsplash.com/photo-1632754724733-a220cd51b7d2?auto=format&fit=crop&w=600&h=800&q=80",
+  "relaxed-graphic-tee": "https://images.unsplash.com/photo-1610142991820-e02266a4a9f0?auto=format&fit=crop&w=600&h=800&q=80",
+  "white-poplin-shirt": "https://images.unsplash.com/photo-1583846783214-7229a91b20ed?auto=format&fit=crop&w=600&h=800&q=80",
+  "high-rise-skinny-jeans": "https://images.unsplash.com/photo-1475178626620-a4d074967452?auto=format&fit=crop&w=600&h=800&q=80",
+  "wide-leg-palazzo-pants": "https://images.unsplash.com/photo-1687825515654-23620796760c?auto=format&fit=crop&w=600&h=800&q=80",
+  "cropped-denim-jacket": "https://images.unsplash.com/photo-1577660002965-04865592fc60?auto=format&fit=crop&w=600&h=800&q=80",
+  "ribbed-soft-cardigan": "https://images.unsplash.com/photo-1683315565563-f72590773805?auto=format&fit=crop&w=600&h=800&q=80",
+  "jamdani-motif-saree": "https://images.unsplash.com/photo-1739429942851-9083ee185d3d?auto=format&fit=crop&w=600&h=800&q=80",
+  "katan-silk-saree": "https://images.unsplash.com/photo-1641699862936-be9f49b1c38d?auto=format&fit=crop&w=600&h=800&q=80",
+  "nude-ballet-flats": "https://images.unsplash.com/photo-1720604083961-88336789791e?auto=format&fit=crop&w=600&h=800&q=80",
+  "strappy-block-sandals": "https://images.unsplash.com/photo-1630407332126-70ebb700976b?auto=format&fit=crop&w=600&h=800&q=80",
+  "quilted-crossbody-bag": "https://images.unsplash.com/photo-1760624294514-3548bee70d26?auto=format&fit=crop&w=600&h=800&q=80",
+  "gold-plated-jhumka": "https://images.unsplash.com/photo-1714733831162-0a6e849141be?auto=format&fit=crop&w=600&h=800&q=80",
+  "navy-pique-polo": "https://images.unsplash.com/photo-1625910513413-c23b8bb81cba?auto=format&fit=crop&w=600&h=800&q=80",
+  "emerald-silk-panjabi": "https://images.unsplash.com/photo-1774171312574-c468f3f5f0fa?auto=format&fit=crop&w=600&h=800&q=80",
+  "white-cotton-panjabi": "https://images.unsplash.com/photo-1774527929750-f2f32fbb3b93?auto=format&fit=crop&w=600&h=800&q=80",
+  "slim-tapered-jeans": "https://images.unsplash.com/photo-1714143136372-ddaf8b606da7?auto=format&fit=crop&w=600&h=800&q=80",
+  "wool-blend-trousers": "https://images.unsplash.com/photo-1624835567150-0c530a20d8cc?auto=format&fit=crop&w=600&h=800&q=80",
+  "merino-crewneck-sweater": "https://images.unsplash.com/photo-1610901157620-340856d0a50f?auto=format&fit=crop&w=600&h=800&q=80",
+  "tan-penny-loafers": "https://images.unsplash.com/photo-1777987601447-266e128de448?auto=format&fit=crop&w=600&h=800&q=80",
+  "leather-slide-sandals": "https://images.unsplash.com/photo-1585120824848-8a5cd41493d2?auto=format&fit=crop&w=600&h=800&q=80",
+  "minimalist-steel-watch": "https://images.unsplash.com/photo-1582150264904-e0bea5ef0ad1?auto=format&fit=crop&w=600&h=800&q=80",
+  "full-grain-leather-belt": "https://images.unsplash.com/photo-1664285612706-b32633c95820?auto=format&fit=crop&w=600&h=800&q=80",
+  "bifold-leather-wallet": "https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=600&h=800&q=80",
+  "dino-print-tee": "https://images.unsplash.com/photo-1563773617060-f29607ce70a1?auto=format&fit=crop&w=600&h=800&q=80",
+  "floral-party-frock": "https://images.unsplash.com/photo-1620774760711-caa4c94d683a?auto=format&fit=crop&w=600&h=800&q=80",
+  "chunky-knit-pullover": "https://images.unsplash.com/photo-1631541911232-72bc7448820a?auto=format&fit=crop&w=600&h=800&q=80",
+  "school-uniform-shirt": "https://images.unsplash.com/photo-1698992939360-7a413b5419ce?auto=format&fit=crop&w=600&h=800&q=80",
+  "velcro-light-up-sneakers": "https://images.unsplash.com/photo-1678192568478-9488ee55def6?auto=format&fit=crop&w=600&h=800&q=80",
+  "cartoon-mini-backpack": "https://images.unsplash.com/photo-1742986410468-0a173a45a21d?auto=format&fit=crop&w=600&h=800&q=80",
+  "structured-tote-handbag": "https://images.unsplash.com/photo-1624687943971-e86af76d57de?auto=format&fit=crop&w=600&h=800&q=80",
+  "urban-canvas-backpack": "https://images.unsplash.com/photo-1491637639811-60e2756cc1c7?auto=format&fit=crop&w=600&h=800&q=80",
+  "slim-card-wallet": "https://images.unsplash.com/photo-1614330315526-166f2d71e544?auto=format&fit=crop&w=600&h=800&q=80",
+  "rose-gold-watch": "https://images.unsplash.com/photo-1525740664269-1bb17f251737?auto=format&fit=crop&w=600&h=800&q=80",
+  "pearl-drop-earrings": "https://images.unsplash.com/photo-1682822749969-61a63203c501?auto=format&fit=crop&w=600&h=800&q=80",
+  "layered-chain-necklace": "https://images.unsplash.com/photo-1633810542706-90e5ff7557be?auto=format&fit=crop&w=600&h=800&q=80",
+  "adjustable-stone-ring": "https://images.unsplash.com/photo-1611087388916-b6c97e01735b?auto=format&fit=crop&w=600&h=800&q=80",
+  "retro-round-sunglasses": "https://images.unsplash.com/photo-1649119161997-00ffc8c24e11?auto=format&fit=crop&w=600&h=800&q=80",
+  "printed-silk-scarf": "https://images.unsplash.com/photo-1623832101940-647285e32a58?auto=format&fit=crop&w=600&h=800&q=80",
+  "classic-baseball-cap": "https://images.unsplash.com/photo-1521369909029-2afed882baee?auto=format&fit=crop&w=600&h=800&q=80",
+};
 
 // The frontend's 12 mock products. `sizes` spreads the price range across
 // real Size variants; a lone price gets one "Default" variant.
@@ -224,7 +273,7 @@ const createProduct = async (def, categoryBySlug, sizeOption) => {
         cat,
         name,
         slug,
-        img: picsum(slug),
+        img: FILLER_IMG[slug] ?? picsum(slug),
         featured: featured === 1,
         rating,
         reviews,
@@ -236,6 +285,17 @@ const createProduct = async (def, categoryBySlug, sizeOption) => {
       sizeOption,
     );
   }
+
+  // ---- upgrade picsum placeholders on already-seeded products ----
+  let fixed = 0;
+  for (const [slug, url] of Object.entries(FILLER_IMG)) {
+    const updated = await prisma.productImage.updateMany({
+      where: { url: { startsWith: "https://picsum.photos/" }, product: { slug } },
+      data: { url },
+    });
+    fixed += updated.count;
+  }
+  if (fixed) console.log(`Upgraded ${fixed} picsum placeholder image(s).`);
 
   // ---- megamenu pins (replace per root) ----
   for (const [rootSlug, productSlugs] of Object.entries(MENU_PINS)) {

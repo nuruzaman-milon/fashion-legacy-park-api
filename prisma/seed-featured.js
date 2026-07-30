@@ -28,6 +28,19 @@ const FEATURED = [
   "mens-watches",
 ];
 
+// Hand-picked Unsplash photos matching each category (visually verified).
+// Picsum placeholders returned random landscapes that clashed with the tiles.
+const CATEGORY_IMG = {
+  "sarees-ethnic": "https://images.unsplash.com/photo-1610313416458-8e435d6f7ed2?auto=format&fit=crop&w=600&h=750&q=80",
+  "womens-dresses": "https://images.unsplash.com/photo-1640923160720-35dddb6348ab?auto=format&fit=crop&w=600&h=750&q=80",
+  "mens-panjabi": "https://images.unsplash.com/photo-1634843824921-83bb75483c59?auto=format&fit=crop&w=600&h=750&q=80",
+  "womens-heels": "https://images.unsplash.com/photo-1590099033615-be195f8d575c?auto=format&fit=crop&w=600&h=750&q=80",
+  "handbags": "https://images.unsplash.com/photo-1597633125184-9fd7e54f0ff7?auto=format&fit=crop&w=600&h=750&q=80",
+  "lipstick": "https://images.unsplash.com/photo-1626895872564-b691b6877b83?auto=format&fit=crop&w=600&h=750&q=80",
+  "kids-sets-frocks": "https://images.unsplash.com/photo-1566454544259-f4b94c3d758c?auto=format&fit=crop&w=600&h=750&q=80",
+  "mens-watches": "https://images.unsplash.com/photo-1670177257750-9b47927f68eb?auto=format&fit=crop&w=600&h=750&q=80",
+};
+
 async function main() {
   const cleared = await prisma.category.updateMany({
     where: { showOnHome: true, slug: { notIn: FEATURED } },
@@ -48,9 +61,11 @@ async function main() {
       data: {
         showOnHome: true,
         homeSortOrder: index,
-        ...(category.image
-          ? {}
-          : { image: `https://picsum.photos/seed/${slug}/600/750` }),
+        // Fill in when empty, and upgrade old picsum placeholders; an
+        // admin-uploaded photo still survives a re-run.
+        ...(!category.image || category.image.startsWith("https://picsum.photos/")
+          ? { image: CATEGORY_IMG[slug] ?? `https://picsum.photos/seed/${slug}/600/750` }
+          : {}),
       },
     });
     console.log(`featured #${index}: ${category.name} (${slug})`);

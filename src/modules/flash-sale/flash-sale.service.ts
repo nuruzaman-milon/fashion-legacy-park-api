@@ -2,6 +2,7 @@ import { FlashSale, Prisma } from "@prisma/client";
 import prisma from "../../lib/prisma";
 import ApiError from "../../utils/ApiError";
 import { visibleWhere } from "../product/browse.service";
+import { applyRule, toNum } from "./flash-pricing";
 import {
   paginate,
   Paginated,
@@ -17,31 +18,6 @@ import {
 } from "./flash-sale.validation";
 
 const SORTABLE = ["startsAt", "endsAt", "createdAt", "title"] as const;
-
-// Money math in plain numbers: Decimal(10,2) fits a double exactly enough for
-// display pricing. The authoritative charge at checkout must re-resolve.
-const toNum = (d: Prisma.Decimal | number): number => Number(d);
-
-const round2 = (n: number): number => Math.round(n * 100) / 100;
-
-type RuleForPricing = {
-  discountType: "PERCENTAGE" | "FIXED" | "FREE_SHIPPING";
-  discountValue: Prisma.Decimal;
-  maxDiscount: Prisma.Decimal | null;
-};
-
-const applyRule = (price: number, rule: RuleForPricing): number => {
-  let discount =
-    rule.discountType === "PERCENTAGE"
-      ? (price * toNum(rule.discountValue)) / 100
-      : toNum(rule.discountValue);
-
-  if (rule.maxDiscount !== null) {
-    discount = Math.min(discount, toNum(rule.maxDiscount));
-  }
-
-  return round2(Math.max(0, price - discount));
-};
 
 // ---------------------------------------------------------------------------
 // Public
@@ -125,7 +101,21 @@ export const getActiveSale = async () => {
   const productRules = rules.filter((r) => r.scope === "PRODUCT");
   const categoryRules = rules.filter((r) => r.scope === "CATEGORY");
 
-  const cards = [];
+  type Card = {
+    variantId: string;
+    variantName: string;
+    price: Prisma.Decimal;
+    comparePrice: Prisma.Decimal | null;
+    flashPrice: string;
+    quantityLimit: number | null;
+    soldCount: number;
+    remaining: number | null;
+    available: number;
+    variantCount: number;
+    product: Omit<(typeof items)[number]["variant"]["product"], "categoryId">;
+  };
+
+  const cards: Card[] = [];
 
   for (const item of items) {
     const { variant } = item;
@@ -163,8 +153,41 @@ export const getActiveSale = async () => {
           ? null
           : Math.max(0, item.quantityLimit - item.soldCount),
       available: Math.max(0, variant.stock - variant.reservedStock),
+      variantCount: 1,
       product,
     });
+  }
+
+  // ONE card per product, not one per variant -- four colours of a watch are
+  // one deal, not four duplicate tiles. The cheapest flash price fronts the
+  // card; caps, sold counts and stock aggregate across the variants (any
+  // uncapped variant makes the product uncapped).
+  const byProduct = new Map<string, Card>();
+
+  for (const card of cards) {
+    const existing = byProduct.get(card.product.id);
+    if (!existing) {
+      byProduct.set(card.product.id, card);
+      continue;
+    }
+    if (Number(card.flashPrice) < Number(existing.flashPrice)) {
+      existing.variantId = card.variantId;
+      existing.variantName = card.variantName;
+      existing.price = card.price;
+      existing.comparePrice = card.comparePrice;
+      existing.flashPrice = card.flashPrice;
+    }
+    existing.soldCount += card.soldCount;
+    existing.quantityLimit =
+      existing.quantityLimit === null || card.quantityLimit === null
+        ? null
+        : existing.quantityLimit + card.quantityLimit;
+    existing.remaining =
+      existing.remaining === null || card.remaining === null
+        ? null
+        : existing.remaining + card.remaining;
+    existing.available += card.available;
+    existing.variantCount += 1;
   }
 
   return {
@@ -174,7 +197,7 @@ export const getActiveSale = async () => {
     banner: sale.banner,
     startsAt: sale.startsAt,
     endsAt: sale.endsAt,
-    items: cards,
+    items: [...byProduct.values()],
   };
 };
 
@@ -242,7 +265,16 @@ export const getSaleById = async (id: string) => {
               name: true,
               sku: true,
               price: true,
-              product: { select: { id: true, name: true, slug: true } },
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                  // Lets the admin UI resolve CATEGORY rules client-side and
+                  // preview the exact flash price per row.
+                  categoryId: true,
+                },
+              },
             },
           },
         },

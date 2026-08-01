@@ -25,6 +25,8 @@ import {
 } from "../modules/product";
 import { cartRoutes } from "../modules/cart";
 import { wishlistRoutes } from "../modules/wishlist";
+import { orderRoutes, adminOrderRoutes } from "../modules/order";
+import { adminStatsRoutes } from "../modules/dashboard";
 import uploadRoutes from "../modules/upload/upload.routes";
 
 const router = Router();
@@ -47,6 +49,7 @@ router.use("/options", publicOptionRoutes);
 router.use("/products", publicProductRoutes);
 router.use("/cart", cartRoutes);
 router.use("/wishlist", wishlistRoutes);
+router.use("/orders", orderRoutes);
 
 // ---- seller portal (role: SELLER) -----------------------------------------
 router.use("/seller/products", sellerProductRoutes);
@@ -64,6 +67,8 @@ router.use("/admin/options", adminOptionRoutes);
 router.use("/admin/option-values", adminOptionValueRoutes);
 router.use("/admin/products", adminProductRoutes);
 router.use("/admin/catalog", adminCatalogResourceRoutes);
+router.use("/admin/orders", adminOrderRoutes);
+router.use("/admin/stats", adminStatsRoutes);
 
 // Sellers upload product photos too, so this is not under /admin.
 router.use("/uploads", uploadRoutes);

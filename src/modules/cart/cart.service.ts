@@ -1,6 +1,10 @@
 import { Prisma, ProductStatus, SellerStatus } from "@prisma/client";
 import prisma from "../../lib/prisma";
 import ApiError from "../../utils/ApiError";
+import {
+  FlashDeal,
+  flashDealsForVariants,
+} from "../flash-sale/flash-pricing";
 import { AddToCartInput } from "./cart.validation";
 
 /**
@@ -33,6 +37,8 @@ const cartItemInclude = {
           name: true,
           slug: true,
           status: true,
+          // The flash resolver matches CATEGORY rules through the ancestry.
+          categoryId: true,
           sellerId: true,
           seller: { select: { status: true } },
           images: {
@@ -57,7 +63,7 @@ type CartItemWithVariant = Prisma.CartItemGetPayload<{
  * cached flag would be wrong within seconds. Deriving it on read is cheap and
  * always correct.
  */
-const evaluate = (item: CartItemWithVariant) => {
+const evaluate = (item: CartItemWithVariant, deal?: FlashDeal) => {
   const { variant } = item;
   const { product } = variant;
 
@@ -82,7 +88,9 @@ const evaluate = (item: CartItemWithVariant) => {
     reason = "INSUFFICIENT_STOCK";
   }
 
-  const unitPrice = variant.price;
+  // The live flash sale reprices the line while it runs. The regular price
+  // stays on `variant.price`, so the client can show the strikethrough.
+  const unitPrice = deal ? new Prisma.Decimal(deal.flashPrice) : variant.price;
   const lineTotal = unitPrice.mul(item.quantity);
 
   const addedPrice = item.addedPrice;
@@ -93,6 +101,7 @@ const evaluate = (item: CartItemWithVariant) => {
     quantity: item.quantity,
     unitPrice,
     lineTotal,
+    onFlashSale: deal !== undefined,
     isAvailable: reason === null,
     unavailableReason: reason,
     // Lets the client clamp its quantity stepper instead of guessing.
@@ -119,8 +128,14 @@ const evaluate = (item: CartItemWithVariant) => {
   };
 };
 
-const buildCart = (cartId: string, items: CartItemWithVariant[]) => {
-  const evaluated = items.map(evaluate);
+const buildCart = (
+  cartId: string,
+  items: CartItemWithVariant[],
+  deals: Map<string, FlashDeal>,
+) => {
+  const evaluated = items.map((item) =>
+    evaluate(item, deals.get(item.variant.id)),
+  );
 
   // Only sellable lines count toward the total, so the figure always matches
   // what checkout would actually charge.
@@ -167,7 +182,16 @@ const loadCart = async (cartId: string) => {
     orderBy: { createdAt: "desc" },
   });
 
-  return buildCart(cartId, items);
+  const deals = await flashDealsForVariants(
+    items.map((i) => ({
+      id: i.variant.id,
+      productId: i.variant.product.id,
+      categoryId: i.variant.product.categoryId,
+      price: i.variant.price,
+    })),
+  );
+
+  return buildCart(cartId, items, deals);
 };
 
 export const getCart = async (userId: string) => {

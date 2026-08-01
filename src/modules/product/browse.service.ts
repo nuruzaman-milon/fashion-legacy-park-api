@@ -1,6 +1,7 @@
 import { Prisma, ProductStatus, SellerStatus } from "@prisma/client";
 import prisma from "../../lib/prisma";
 import ApiError from "../../utils/ApiError";
+import { flashDealsForVariants } from "../flash-sale/flash-pricing";
 import { paginate, Paginated, toPrismaPaging } from "../../utils/pagination";
 import { BrowseQuery } from "./product.validation";
 
@@ -278,14 +279,39 @@ export const getBySlug = async (slug: string) => {
     throw new ApiError(404, "Product not found");
   }
 
+  // The live sale's price for each variant -- the detail page must agree
+  // with the homepage sale section, not show the shelf price next to it.
+  const deals = await flashDealsForVariants(
+    product.variants.map((v) => ({
+      id: v.id,
+      productId: product.id,
+      categoryId: product.category.id,
+      price: v.price,
+    })),
+  );
+
   // Available, not raw stock: reserved units are held by carts mid-checkout and
   // are not purchasable. Exposing raw stock would oversell during a flash sale.
-  const variants = product.variants.map(({ reservedStock, ...v }) => ({
-    ...v,
-    available: Math.max(0, v.stock - reservedStock),
-    valueIds: v.variantOptions.map((vo) => vo.valueId),
-    variantOptions: undefined,
-  }));
+  const variants = product.variants.map(({ reservedStock, ...v }) => {
+    const deal = deals.get(v.id);
+    return {
+      ...v,
+      available: Math.max(0, v.stock - reservedStock),
+      valueIds: v.variantOptions.map((vo) => vo.valueId),
+      variantOptions: undefined,
+      // null when the variant isn't in the live sale (or its cap sold out).
+      flash: deal
+        ? {
+            price: deal.flashPrice,
+            quantityLimit: deal.quantityLimit,
+            soldCount: deal.soldCount,
+            remaining: deal.remaining,
+          }
+        : null,
+    };
+  });
+
+  const anyDeal = deals.values().next().value;
 
   // Cheap and useful: lets the frontend grey out a colour with nothing in stock
   // without recomputing the combination map itself.
@@ -315,6 +341,9 @@ export const getBySlug = async (slug: string) => {
     productOptions,
     variants,
     inStockValueIds: [...inStockValueIds],
+    flashSale: anyDeal
+      ? { id: anyDeal.saleId, title: anyDeal.title, endsAt: anyDeal.endsAt }
+      : null,
   };
 };
 

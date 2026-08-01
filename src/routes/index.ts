@@ -28,6 +28,7 @@ import { wishlistRoutes } from "../modules/wishlist";
 import { orderRoutes, adminOrderRoutes } from "../modules/order";
 import { adminStatsRoutes } from "../modules/dashboard";
 import { reviewRoutes, adminReviewRoutes } from "../modules/review";
+import { notificationRoutes } from "../modules/notification";
 import uploadRoutes from "../modules/upload/upload.routes";
 
 const router = Router();
@@ -52,6 +53,7 @@ router.use("/cart", cartRoutes);
 router.use("/wishlist", wishlistRoutes);
 router.use("/orders", orderRoutes);
 router.use("/reviews", reviewRoutes);
+router.use("/notifications", notificationRoutes);
 
 // ---- seller portal (role: SELLER) -----------------------------------------
 router.use("/seller/products", sellerProductRoutes);

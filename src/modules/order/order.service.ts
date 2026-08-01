@@ -9,6 +9,7 @@ import {
 import prisma from "../../lib/prisma";
 import ApiError from "../../utils/ApiError";
 import { flashDealsForVariants, toNum } from "../flash-sale/flash-pricing";
+import { notifyAdmins } from "../notification/notification.service";
 import { refreshProduct } from "../product/denormalize";
 import {
   paginate,
@@ -165,6 +166,7 @@ export const placeOrder = async (userId: string, input: PlaceOrderInput) => {
               price: true,
               stock: true,
               reservedStock: true,
+              lowStockThreshold: true,
               isActive: true,
               product: {
                 select: {
@@ -392,6 +394,31 @@ export const placeOrder = async (userId: string, input: PlaceOrderInput) => {
 
     await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
 
+    await notifyAdmins(tx, {
+      type: "ORDER",
+      title: `New order ${invoiceNo}`,
+      message: `${input.receiverName} · ${lines.length} ${
+        lines.length === 1 ? "item" : "items"
+      } · ৳${total.toFixed(0)} (COD)`,
+      link: `/admin/orders/${created.id}`,
+    });
+
+    // Only threshold CROSSINGS notify — an already-low variant selling again
+    // would otherwise ring the bell on every order.
+    for (const line of lines) {
+      const { variant } = line.item;
+      const before = variant.stock;
+      const after = before - line.item.quantity;
+      if (before > variant.lowStockThreshold && after <= variant.lowStockThreshold) {
+        await notifyAdmins(tx, {
+          type: "SYSTEM",
+          title: after === 0 ? "Out of stock" : "Low stock",
+          message: `${variant.product.name} — ${variant.name} has ${after} left`,
+          link: `/admin/products/${variant.product.id}/edit`,
+        });
+      }
+    }
+
     return created;
   });
 
@@ -496,6 +523,7 @@ export const cancelMyOrder = async (
     where: { id, userId },
     select: {
       id: true,
+      invoiceNo: true,
       orderStatus: true,
       items: { select: { variantId: true, productId: true, quantity: true } },
     },
@@ -516,7 +544,17 @@ export const cancelMyOrder = async (
     );
   }
 
-  await prisma.$transaction((tx) => cancelInTx(tx, order, userId, reason));
+  await prisma.$transaction(async (tx) => {
+    await cancelInTx(tx, order, userId, reason);
+    // Customer-initiated only — an admin cancelling from the panel needs no
+    // bell about their own click.
+    await notifyAdmins(tx, {
+      type: "ORDER",
+      title: `Order cancelled ${order.invoiceNo}`,
+      message: reason ? `Customer's reason: ${reason}` : "Cancelled by the customer",
+      link: `/admin/orders/${order.id}`,
+    });
+  });
 
   return getMyOrder(userId, id);
 };

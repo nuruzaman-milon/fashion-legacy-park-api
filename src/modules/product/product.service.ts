@@ -9,6 +9,7 @@ import {
   toPrismaPaging,
 } from "../../utils/pagination";
 import { deleteImage } from "../../lib/cloudinary";
+import { notifyAdmins } from "../notification/notification.service";
 import {
   CreateProductInput,
   ListManageQuery,
@@ -310,12 +311,23 @@ export const submitForReview = async (
     );
   }
 
-  return prisma.product.update({
-    where: { id },
-    data: {
-      status: ProductStatus.PENDING_APPROVAL,
-      rejectionReason: null,
-    },
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.product.update({
+      where: { id },
+      data: {
+        status: ProductStatus.PENDING_APPROVAL,
+        rejectionReason: null,
+      },
+    });
+
+    await notifyAdmins(tx, {
+      type: "SELLER",
+      title: "Product submitted for approval",
+      message: `"${updated.name}" is waiting for a decision`,
+      link: `/admin/products/${updated.id}/edit`,
+    });
+
+    return updated;
   });
 };
 

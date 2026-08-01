@@ -1,6 +1,7 @@
 import { OrderStatus, Prisma, ReviewStatus } from "@prisma/client";
 import prisma from "../../lib/prisma";
 import ApiError from "../../utils/ApiError";
+import { notifyAdmins } from "../notification/notification.service";
 import { recalcProductAggregates } from "../product/denormalize";
 import {
   paginate,
@@ -26,6 +27,7 @@ export const createReview = async (
     select: {
       id: true,
       productId: true,
+      title: true,
       order: { select: { userId: true, orderStatus: true } },
       review: { select: { id: true } },
     },
@@ -51,16 +53,27 @@ export const createReview = async (
 
   // PENDING by default — the moderation queue publishes it, so nothing a
   // customer writes reaches product pages unseen.
-  return prisma.review.create({
-    data: {
-      userId,
-      productId: orderItem.productId,
-      orderItemId: orderItem.id,
-      rating: input.rating,
-      comment: input.comment,
-      isVerifiedPurchase: true,
-    },
-    select: { id: true, rating: true, comment: true, status: true },
+  return prisma.$transaction(async (tx) => {
+    const review = await tx.review.create({
+      data: {
+        userId,
+        productId: orderItem.productId!,
+        orderItemId: orderItem.id,
+        rating: input.rating,
+        comment: input.comment,
+        isVerifiedPurchase: true,
+      },
+      select: { id: true, rating: true, comment: true, status: true },
+    });
+
+    await notifyAdmins(tx, {
+      type: "SYSTEM",
+      title: "New review awaiting moderation",
+      message: `${input.rating}★ on ${orderItem.title}`,
+      link: "/admin/reviews",
+    });
+
+    return review;
   });
 };
 

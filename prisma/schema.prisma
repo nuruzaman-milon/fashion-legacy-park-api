@@ -94,6 +94,8 @@ model User {
   notifications     Notification[]
   couponRedemptions CouponRedemption[]
   returnRequests    ReturnRequest[]
+  conversations     Conversation[]
+  chatMessages      ChatMessage[]
 
   @@index([role])
 }
@@ -1604,6 +1606,67 @@ model Notification {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, isRead, createdAt(sort: Desc)])
+}
+
+// =====================================================================
+// CHAT -- customer <-> store support threads, polling-based delivery
+// =====================================================================
+
+enum ConversationStatus {
+  OPEN
+  CLOSED
+}
+
+model Conversation {
+  id String @id @default(cuid())
+
+  customerId String
+
+  // Reserved for a future customer <-> seller thread. null = store support.
+  // One support conversation per customer is enforced in the service, not by
+  // a unique index -- Postgres treats the NULL sellerId rows as distinct.
+  sellerId String?
+
+  status ConversationStatus @default(OPEN)
+
+  // Denormalised inbox sort key, bumped on every message in the same write.
+  lastMessageAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  customer User @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  messages ChatMessage[]
+
+  @@index([status, lastMessageAt(sort: Desc)])
+  @@index([customerId])
+}
+
+model ChatMessage {
+  id String @id @default(cuid())
+
+  conversationId String
+
+  senderId String
+
+  // Denormalised so bubbles render without resolving the sender's role, and
+  // so an admin's later demotion cannot re-side historical messages.
+  isStaff Boolean @default(false)
+
+  body String
+
+  // Read by the RECEIVING side: staff messages -> customer, and vice versa.
+  isRead Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  sender User @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([conversationId, isStaff, isRead])
 }
 
 // =====================================================================

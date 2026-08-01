@@ -272,6 +272,23 @@ export const getBySlug = async (slug: string) => {
           variantOptions: { select: { valueId: true } },
         },
       },
+      // The latest published reviews ride along with the page — moderation
+      // (ReviewStatus) is the only gate between a customer's words and here.
+      reviews: {
+        where: { status: "APPROVED" },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: {
+          id: true,
+          rating: true,
+          comment: true,
+          isVerifiedPurchase: true,
+          adminReply: true,
+          helpfulCount: true,
+          createdAt: true,
+          user: { select: { name: true } },
+        },
+      },
     },
   });
 

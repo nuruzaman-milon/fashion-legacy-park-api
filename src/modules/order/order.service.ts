@@ -122,6 +122,8 @@ const orderDetailInclude = {
       totalPrice: true,
       image: true,
       product: { select: { slug: true } },
+      // Lets the order page offer "rate this" exactly once per line.
+      review: { select: { id: true, rating: true, status: true } },
     },
   },
   statusHistory: {

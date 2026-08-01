@@ -18,6 +18,8 @@ export const placeOrderSchema = z.object({
     phone: bdPhone,
     district: z.string().trim().min(2).max(100),
     address: z.string().trim().min(5, "Enter the full street address").max(255),
+    /** Provenance of a saved address — the ship* snapshot stays authoritative. */
+    addressId: z.string().min(1).optional(),
     upazila: z.string().trim().max(100).optional(),
     area: z.string().trim().max(100).optional(),
     postalCode: z.string().trim().max(20).optional(),

@@ -150,6 +150,18 @@ export const placeOrder = async (userId: string, input: PlaceOrderInput) => {
     select: { email: true, phone: true },
   });
 
+  // Provenance only — the snapshot below is what ships. Owner-scoped so a
+  // guessed id cannot link someone else's address row.
+  if (input.addressId) {
+    const owned = await prisma.address.findFirst({
+      where: { id: input.addressId, userId },
+      select: { id: true },
+    });
+    if (!owned) {
+      throw new ApiError(400, "That saved address no longer exists");
+    }
+  }
+
   const cart = await prisma.cart.findUnique({
     where: { userId },
     select: {
@@ -313,6 +325,7 @@ export const placeOrder = async (userId: string, input: PlaceOrderInput) => {
         userId,
         email: user.email,
         phone: user.phone ?? input.phone,
+        addressId: input.addressId,
         invoiceNo,
         shipReceiverName: input.receiverName,
         shipPhone: input.phone,

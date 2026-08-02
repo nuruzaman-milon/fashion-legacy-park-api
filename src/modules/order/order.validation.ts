@@ -24,6 +24,8 @@ export const placeOrderSchema = z.object({
     area: z.string().trim().max(100).optional(),
     postalCode: z.string().trim().max(20).optional(),
     note: z.string().trim().max(500).optional(),
+    /** Validated and priced server-side by the coupon engine. */
+    couponCode: z.string().trim().min(1).max(40).optional(),
     paymentMethod: z.literal("COD"),
   }),
 });

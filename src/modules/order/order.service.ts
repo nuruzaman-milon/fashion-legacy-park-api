@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 import prisma from "../../lib/prisma";
 import ApiError from "../../utils/ApiError";
+import { evaluateCoupon } from "../coupon/coupon.service";
 import { flashDealsForVariants, toNum } from "../flash-sale/flash-pricing";
 import { notifyAdmins } from "../notification/notification.service";
 import { refreshProduct } from "../product/denormalize";
@@ -93,6 +94,8 @@ const orderListSelect = {
   subtotal: true,
   shippingCharge: true,
   tax: true,
+  discount: true,
+  couponCode: true,
   total: true,
   createdAt: true,
   items: {
@@ -267,16 +270,39 @@ export const placeOrder = async (userId: string, input: PlaceOrderInput) => {
   const settings = await checkoutSettings();
 
   const subtotal = round2(lines.reduce((sum, l) => sum + l.totalPrice, 0));
+
+  // The same engine the checkout preview used — a code that previewed clean
+  // can only fail here on a race (limit spent, window closed) since.
+  const couponResult = input.couponCode
+    ? await evaluateCoupon(
+        userId,
+        input.couponCode,
+        lines.map((line) => ({
+          productId: line.item.variant.product.id,
+          categoryId: line.item.variant.product.categoryId,
+          unitPrice: line.unitPrice,
+          quantity: line.item.quantity,
+          onFlashSale: Boolean(line.deal),
+        })),
+        subtotal,
+      )
+    : null;
+  const discount = couponResult?.discount ?? 0;
+
   const districtSlug = input.district.toLowerCase();
-  const shippingCharge =
+  const baseShipping =
     subtotal >= settings.freeShippingMin
       ? 0
       : districtSlug === "dhaka"
         ? settings.insideDhaka
         : settings.outsideDhaka;
+  // A FREE_SHIPPING coupon zeroes the charge itself (so every surface that
+  // renders shippingCharge === 0 as "Free" just works); goods coupons ride
+  // the discount column instead.
+  const shippingCharge = couponResult?.freeShipping ? 0 : baseShipping;
   const taxRate = settings.vatEnabled ? settings.vatRate : 0;
-  const tax = round2((subtotal * taxRate) / 100);
-  const total = round2(subtotal + shippingCharge + tax);
+  const tax = round2(((subtotal - discount) * taxRate) / 100);
+  const total = round2(subtotal - discount + shippingCharge + tax);
 
   const order = await prisma.$transaction(async (tx) => {
     // Conditional decrement, not read-then-write (FEATURE.md hard rule): the
@@ -342,7 +368,14 @@ export const placeOrder = async (userId: string, input: PlaceOrderInput) => {
         shippingCharge,
         taxRate,
         tax,
+        discount,
         total,
+        ...(couponResult && {
+          couponId: couponResult.coupon.id,
+          couponCode: couponResult.coupon.code,
+          couponDiscountType: couponResult.coupon.discountType,
+          couponDiscountValue: couponResult.coupon.discountValue,
+        }),
         paymentMethod: PaymentMethod.COD,
         note: input.note,
         items: {
@@ -365,6 +398,53 @@ export const placeOrder = async (userId: string, input: PlaceOrderInput) => {
       },
       include: orderDetailInclude,
     });
+
+    // Claim the coupon the same conditional way as stock: the WHERE clause
+    // serializes two last-slot redemptions, and the DB CHECK
+    // (usedCount <= totalUsageLimit) backs it up.
+    if (couponResult) {
+      const { coupon } = couponResult;
+
+      const claimed = await tx.coupon.updateMany({
+        where: {
+          id: coupon.id,
+          isActive: true,
+          ...(coupon.totalUsageLimit !== null && {
+            usedCount: { lt: coupon.totalUsageLimit },
+          }),
+        },
+        data: { usedCount: { increment: 1 } },
+      });
+
+      if (claimed.count === 0) {
+        throw new ApiError(
+          409,
+          `Coupon ${coupon.code} just ran out — remove it and place the order again`,
+        );
+      }
+
+      // Recount inside the transaction — two parallel checkouts by the same
+      // user both pass the advisory check in evaluateCoupon.
+      const mine = await tx.couponRedemption.count({
+        where: { couponId: coupon.id, userId },
+      });
+      if (mine >= coupon.perUserLimit) {
+        throw new ApiError(
+          409,
+          `You have already used ${coupon.code} the maximum number of times`,
+        );
+      }
+
+      await tx.couponRedemption.create({
+        data: {
+          couponId: coupon.id,
+          userId,
+          orderId: created.id,
+          // For FREE_SHIPPING the saving is the charge that was waived.
+          discountAmount: couponResult.freeShipping ? baseShipping : discount,
+        },
+      });
+    }
 
     // Seller settlement rows, written at order time (FEATURE.md rule 5); they
     // move to PAYABLE only after the return window, which the returns module
@@ -433,7 +513,10 @@ export const placeOrder = async (userId: string, input: PlaceOrderInput) => {
     }
 
     return created;
-  });
+    // Checkout deliberately does all its bookkeeping in one transaction
+    // (stock, flash caps, coupon, ledger, notifications — FEATURE.md rules),
+    // which outgrows Prisma's 5s default on a cold dev server.
+  }, { timeout: 15000 });
 
   return order;
 };
@@ -503,6 +586,21 @@ const cancelInTx = async (
     },
   });
 
+  // A cancelled order frees its coupon slot — the redemption ledger makes
+  // the undo precise where a bare counter never could. (Nothing to farm
+  // here: the cancelled order's discount dies with it.)
+  const redemptions = await tx.couponRedemption.findMany({
+    where: { orderId: order.id },
+    select: { id: true, couponId: true },
+  });
+  for (const redemption of redemptions) {
+    await tx.couponRedemption.delete({ where: { id: redemption.id } });
+    await tx.coupon.updateMany({
+      where: { id: redemption.couponId, usedCount: { gt: 0 } },
+      data: { usedCount: { decrement: 1 } },
+    });
+  }
+
   // Cancellable states are all pre-shipment, so the goods are still here —
   // put every unit back. Flash soldCount stays claimed on purpose: releasing
   // it would let order-and-cancel loops farm capped deals.
@@ -567,7 +665,9 @@ export const cancelMyOrder = async (
       message: reason ? `Customer's reason: ${reason}` : "Cancelled by the customer",
       link: `/admin/orders/${order.id}`,
     });
-  });
+    // Restock + coupon release + notify outgrow the 5s default on a cold dev
+    // server, same as placeOrder.
+  }, { timeout: 15000 });
 
   return getMyOrder(userId, id);
 };
@@ -728,7 +828,9 @@ export const adminUpdateStatus = async (
         changedById: actorId,
       },
     });
-  });
+    // The CANCELLED branch runs the full restock + coupon release, which
+    // outgrows the 5s default on a cold dev server.
+  }, { timeout: 15000 });
 
   return adminGetOrder(id);
 };

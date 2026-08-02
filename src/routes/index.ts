@@ -11,6 +11,7 @@ import {
   publicFlashSaleRoutes,
   adminFlashSaleRoutes,
 } from "../modules/flash-sale";
+import { adminCouponRoutes, publicCouponRoutes } from "../modules/coupon";
 import {
   publicOptionRoutes,
   adminOptionRoutes,
@@ -48,6 +49,7 @@ router.use("/categories", publicCategoryRoutes);
 router.use("/brands", publicBrandRoutes);
 router.use("/banners", publicBannerRoutes);
 router.use("/flash-sales", publicFlashSaleRoutes);
+router.use("/coupons", publicCouponRoutes);
 router.use("/options", publicOptionRoutes);
 router.use("/products", publicProductRoutes);
 router.use("/cart", cartRoutes);
@@ -69,6 +71,7 @@ router.use("/admin/categories", adminCategoryRoutes);
 router.use("/admin/brands", adminBrandRoutes);
 router.use("/admin/banners", adminBannerRoutes);
 router.use("/admin/flash-sales", adminFlashSaleRoutes);
+router.use("/admin/coupons", adminCouponRoutes);
 router.use("/admin/options", adminOptionRoutes);
 router.use("/admin/option-values", adminOptionValueRoutes);
 router.use("/admin/products", adminProductRoutes);

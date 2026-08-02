@@ -49,6 +49,7 @@ export const listMine = async (
   const where: Prisma.NotificationWhereInput = {
     userId,
     ...(query.unread && { isRead: false }),
+    ...(query.type && { type: query.type }),
   };
 
   const [items, total] = await prisma.$transaction([
@@ -63,8 +64,28 @@ export const listMine = async (
   return paginate(items, total, query);
 };
 
-export const unreadCount = async (userId: string): Promise<number> =>
-  prisma.notification.count({ where: { userId, isRead: false } });
+/**
+ * Total plus a per-type breakdown in one query — the bell badge shows the
+ * total while each category tab wears its own count.
+ */
+export const unreadSummary = async (
+  userId: string,
+): Promise<{ count: number; byType: Partial<Record<NotificationType, number>> }> => {
+  const groups = await prisma.notification.groupBy({
+    by: ["type"],
+    where: { userId, isRead: false },
+    _count: { _all: true },
+  });
+
+  const byType: Partial<Record<NotificationType, number>> = {};
+  let count = 0;
+  for (const group of groups) {
+    byType[group.type] = group._count._all;
+    count += group._count._all;
+  }
+
+  return { count, byType };
+};
 
 export const markRead = async (userId: string, id: string): Promise<void> => {
   // Scoped by userId so nobody can mark another user's rows by id.

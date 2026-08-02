@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NotificationType } from "@prisma/client";
 import { paginationQuery } from "../../utils/pagination";
 
 const idParam = z.object({ id: z.string().min(1) });
@@ -11,6 +12,8 @@ export const listNotificationsSchema = z.object({
       .enum(["true", "false"])
       .transform((v) => v === "true")
       .optional(),
+    // Serves the bell's per-category tabs.
+    type: z.enum(NotificationType).optional(),
   }),
 });
 

@@ -128,7 +128,7 @@ export const sendCustomerMessage = async (
 
     if (unreadBefore === 0) {
       await notifyAdmins(tx, {
-        type: "SYSTEM",
+        type: "CHAT",
         title: "New chat message",
         message:
           body.length > 80 ? `${body.slice(0, 77)}…` : body,

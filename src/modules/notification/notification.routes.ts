@@ -40,7 +40,7 @@ notificationRoutes.get(
     sendResponse(res, 200, {
       success: true,
       message: "Unread count fetched",
-      data: { count: await service.unreadCount(req.user!.id) },
+      data: await service.unreadSummary(req.user!.id),
     });
   }),
 );

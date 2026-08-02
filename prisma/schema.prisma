@@ -1584,6 +1584,7 @@ enum NotificationType {
   PAYMENT
   PROMOTION
   SELLER
+  CHAT
 }
 
 model Notification {
